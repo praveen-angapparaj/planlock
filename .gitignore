@@ -1,0 +1,12 @@
+node_modules/
+.vite/
+dist/
+coverage/
+.env
+.env.local
+*.local
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+npm-debug.log*

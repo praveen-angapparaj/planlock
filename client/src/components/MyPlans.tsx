@@ -1,0 +1,13 @@
+import { ArrowRight, ClipboardList, Plus } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { api, type Plan } from '@/api';
+import { Badge, Button, Card, CardContent, CardHeader } from '@/components/ui';
+
+const money = (cents: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(cents / 100);
+
+export function MyPlans({ onOpen, onCreate }: { onOpen: (id: string) => void; onCreate: () => void }) {
+  const [plans, setPlans] = useState<Plan[]>([]); const [error, setError] = useState<string | null>(null);
+  const load = useCallback(async () => { setPlans((await api.plans()).plans); }, []);
+  useEffect(() => { void load().catch((reason) => setError(reason instanceof Error ? reason.message : 'Unable to load plans.')); }, [load]);
+  return <div className="space-y-6"><section className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-sm font-semibold uppercase tracking-[.16em] text-teal-700">My plans</p><h1 className="mt-2 text-3xl font-bold tracking-tight text-navy-950">Your connected plans</h1><p className="mt-3 max-w-2xl text-slate-600">Reopen a saved plan to review its dependencies, reservation, linked supplier payments, and recovery state.</p></div><Button onClick={onCreate}><Plus className="size-4" />Create a plan</Button></section>{error && <p className="rounded-lg bg-rose-50 p-3 text-sm text-rose-800">{error}</p>}{plans.length === 0 ? <Card><CardContent><div className="py-12 text-center"><ClipboardList className="mx-auto size-8 text-teal-700" /><h2 className="mt-3 font-bold">No plans yet</h2><p className="mt-1 text-sm text-slate-600">Create a plan, validate its dependencies, then reserve inventory.</p><Button className="mt-5" onClick={onCreate}>Create your first plan</Button></div></CardContent></Card> : <div className="grid gap-4 md:grid-cols-2">{plans.map((plan) => <Card key={plan.id}><CardHeader><div className="flex items-start justify-between gap-3"><div><h2 className="font-bold">{plan.userRequest}</h2><p className="mt-1 text-sm text-slate-600">{plan.eventDate} · {plan.timezone}</p></div><Badge className={plan.status === 'RESERVED' ? 'bg-emerald-100 text-emerald-800' : plan.validationIssues.length ? 'bg-rose-100 text-rose-800' : 'bg-slate-100 text-slate-700'}>{plan.status.toLowerCase()}</Badge></div></CardHeader><CardContent><p className="text-sm text-slate-600">Version {plan.version} · {plan.items.length} supplier items · budget {money(plan.budgetCents)}</p><Button className="mt-4" size="sm" variant="outline" onClick={() => onOpen(plan.id)}>Open workspace<ArrowRight className="size-4" /></Button></CardContent></Card>)}</div>}</div>;
+}

@@ -1,0 +1,86 @@
+services:
+  - type: web
+    name: planlock-api
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm ci && npm run build
+    preDeployCommand: npm run migrate:postgres --workspace server
+    startCommand: npm run start --workspace server
+    healthCheckPath: /api/ready
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: planlock-postgres
+          property: connectionString
+      - key: PAYPAL_ENV
+        value: sandbox
+      - key: LOCAL_SESSION_SECRET
+        generateValue: true
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: PAYPAL_WEBHOOK_ID
+        sync: false
+      - key: PAYPAL_SELLER_MERCHANT_ID
+        sync: false
+      - key: RENDER_API_KEY
+        sync: false
+      - key: RENDER_WORKFLOW_TASK
+        value: planlock-recovery/processRecovery
+      - key: ALLOWED_FRONTEND_ORIGIN
+        sync: false
+
+  - type: workflow
+    name: planlock-recovery
+    runtime: node
+    region: singapore
+    buildCommand: npm ci && npm run build
+    startCommand: npm run workflow:start --workspace server
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: planlock-postgres
+          property: connectionString
+      - key: PAYPAL_ENV
+        value: sandbox
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: LOCAL_SESSION_SECRET
+        sync: false
+
+  - type: cron
+    name: planlock-recovery-reconciler
+    runtime: node
+    region: singapore
+    schedule: "*/5 * * * *"
+    buildCommand: npm ci && npm run build
+    startCommand: npm run workflow:cron --workspace server
+    envVars:
+      - key: RENDER_API_KEY
+        sync: false
+      - key: RENDER_RECONCILE_TASK
+        value: planlock-recovery/reconcileDueWork
+
+  - type: web
+    name: planlock-web
+    runtime: static
+    buildCommand: npm ci && npm run build --workspace client
+    staticPublishPath: client/dist
+    envVars:
+      - key: VITE_API_BASE_URL
+        sync: false
+
+databases:
+  - name: planlock-postgres
+    plan: free
+    region: singapore
+    databaseName: planlock
+    user: planlock

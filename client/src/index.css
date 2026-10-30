@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * { @apply border-slate-200; }
+  body { @apply m-0 min-w-[320px] bg-slate-50 font-sans antialiased; }
+  button { font: inherit; }
+  code { @apply rounded bg-white/60 px-1 py-0.5 font-mono text-xs; }
+}
