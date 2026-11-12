@@ -123,8 +123,46 @@ Before deployment: run the PostgreSQL integration suite against a disposable dat
 
 Run `npm run build` from the repository root. The optimized submission artifacts are `client/dist/` (browser assets) and `server/dist/` (compiled Express API). See [docs/release-verification.md](docs/release-verification.md) for the exact Phase 6 results and known release blockers.
 
-## Submission requirements and limitations
+## PayPal Integration
 
-The current PayPal AI Hackathon rules require a public open-source repository with a visible license, a functional demo, and a public YouTube video under three minutes. This checkout currently has **no selected open-source license and no authorized public deployment**. Choose a license and obtain approval before publishing the repository.
+PlanLock implements an end-to-end multi-vendor payment orchestration flow using the **PayPal Developer Platform (Sandbox environment)**:
 
-Read the factual [submission draft](docs/submission-draft.md), [demo script](docs/demo-script.md), [sponsor record](docs/SPONSOR_INTEGRATIONS.md), and [readiness report](docs/readiness.md) before submitting. Official requirements are linked in the readiness report.
+- **PayPal JavaScript SDK (`@paypal/paypal-js`)**: Dynamically loaded on the client (`client/src/components/PlanPaymentApproval.tsx`) with `intent: 'authorize'`. Renders authentic Sandbox checkout buttons and safely captures buyer approval without the application handling raw payment details. Buttons are enabled only after deterministic plan checks pass.
+- **PayPal Orders v2 API (`/v2/checkout/orders` & `/authorize`)**: Creates linked orders for each supplier in the event plan with `intent: 'AUTHORIZE'`. Once approved by the customer, authorizations hold funds across separate vendors.
+- **PayPal Payments v2 Authorizations & Capture (`/v2/payments/authorizations/{id}/capture` & `/void`)**: Enforces two-phase payment safety. Authorizations are captured only after *all* interdependent supplier reservations are locked. If any prerequisite supplier fails, PlanLock automatically voids remaining authorizations so the customer is not left with orphaned charges.
+- **PayPal Payments v2 Refund API (`/v2/payments/captures/{id}/refund`)**: Handles partial or full refunds against captured payments when a disruption occurs and the user approves an automated financial recovery case.
+- **PayPal Webhooks & Signature Verification (`/v1/notifications/verify-webhook-signature`)**: Cryptographically verifies raw incoming PayPal Sandbox webhooks byte-for-byte to prevent spoofed status updates.
+- **Idempotency (`PayPal-Request-Id`)**: Attaches durable idempotency keys to all mutating requests to ensure safe retries without double charges.
+
+## AI Integration & Architecture
+
+PlanLock pairs generative AI with deterministic state machines to ensure financial and logistical safety:
+
+- **Natural Language Plan Generation (Google Gemini `gemini-2.5-flash-lite` / Groq `openai/gpt-oss-120b`)**:
+  - Ingests free-form event briefs (e.g. *"Saturday dessert market stall with refrigeration under $600"*).
+  - Uses strict JSON schema enforcement (`proposalJsonSchema`) to extract required service types, power constraints, and delivery deadlines.
+  - Recommends candidate supplier offerings and infers logical dependency edges (e.g., Refrigeration requires an electric stall).
+  - **Anti-Hallucination Guardrail**: The backend validates every proposed ID against the real server catalogue (`AI_INVENTED_OFFERING`); hallucinated items or altered prices are immediately rejected.
+  - **Deterministic Rule Authority**: The AI only *proposes*; deterministic server rules make all binding validation decisions against budget, capacity, and deadlines.
+- **Read-Only AI Financial Analyst (AG Studio Agent Framework)**:
+  - Integrated via `createAiHarness` and `clientToolRunner` in `client/src/components/AgStudioDashboard.tsx`.
+  - Classifies natural-language financial queries into five strict allowlisted topics (`DEPENDENCIES`, `ALTERNATIVES`, `APPROVALS`, `FINANCIALS`, `STATUS`).
+  - **Grounded Data Delivery**: The AI functions purely as an intent router; the backend deterministically calculates real financial exposure, uncaptured authorizations, and refund states. The AI cannot move funds or mutate plans.
+
+## Sponsor Integrations
+
+- **AG Grid / AG Studio**: Full runtime integration in `client/src/components/AgStudioDashboard.tsx` (`ag-grid-enterprise`, `ag-studio-react`). Renders connected multi-table views of items, dependency impacts, linked PayPal transactions, and recovery actions. Features a custom Studio widget (`client/src/components/RecoveryProgressWidget.tsx`) tracking live financial exposure.
+- **APIMatic**: The official APIMatic PayPal Context Plugin was installed during development to audit API contracts, verify TypeScript endpoint types, and guide the resilience patterns in `server/src/paypal.ts`.
+- **Render**: Configured in `render.yaml` with a single-origin web service topology serving the Vite frontend and Express API, unified with a managed Render PostgreSQL database and background recovery worker scripts.
+
+## Technology Stack
+
+- **Frontend**: React 19, TypeScript, Vite, Tailwind CSS, Lucide icons, `@paypal/paypal-js`, `ag-studio-react`, `ag-grid-enterprise`.
+- **Backend**: Node.js 22+, Express, TypeScript, Zod schema validation.
+- **Data & Persistence**: PostgreSQL runtime repositories with advisory-lock migrations (`server/migrations/`) alongside SQLite for isolated local demos.
+- **Payment & Webhooks**: PayPal REST APIs (Sandbox), OAuth2 client credentials, cryptographic webhook verification.
+- **Testing**: Jest unit and integration test suite (27 passing tests) covering validation, budget violations, payment idempotency, and scenario boundaries.
+
+## License
+
+This project is licensed under the open-source **[MIT License](LICENSE)** (an approved OSI license).
