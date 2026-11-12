@@ -20,8 +20,6 @@
     "reset:demo": "npm run reset:demo --workspace server"
   },
   "devDependencies": {
-    "@playwright/test": "^1.65.0",
-    "concurrently": "^9.1.2",
-    "playwright": "^1.65.0"
+    "concurrently": "^9.1.2"
   }
 }
