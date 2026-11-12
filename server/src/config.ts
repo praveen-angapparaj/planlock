@@ -21,6 +21,7 @@ const normalizedEnvironment = {
   PAYPAL_SELLER_MERCHANT_ID: process.env.PAYPAL_SELLER_MERCHANT_ID?.trim() || undefined,
   RENDER_API_KEY: process.env.RENDER_API_KEY?.trim() || undefined,
   RENDER_WORKFLOW_TASK: process.env.RENDER_WORKFLOW_TASK?.trim() || undefined,
+  PORT: process.env.PORT?.trim() || undefined,
   NODE_ENV: process.env.NODE_ENV?.trim() || undefined
 };
 
@@ -33,7 +34,10 @@ const raw = z.object({
   GEMINI_MODEL: z.string().default('gemini-2.5-flash-lite'),
   PAYPAL_ENV: z.string().default('sandbox'),
   BACKEND_PORT: z.coerce.number().int().positive().default(3001),
-  ALLOWED_FRONTEND_ORIGIN: z.string().url().default('http://localhost:5173'),
+  // Render supplies PORT. Keep BACKEND_PORT for local development only.
+  PORT: z.coerce.number().int().positive().optional(),
+  // Leave this unset for the combined same-origin deployment. Set it only for a split frontend/API deployment.
+  ALLOWED_FRONTEND_ORIGIN: z.string().url().optional(),
   LOCAL_SESSION_SECRET: z.string().min(24).optional(),
   DATABASE_URL: z.string().url().optional(),
   PAYPAL_WEBHOOK_ID: z.string().min(1).optional(),
@@ -45,11 +49,6 @@ const raw = z.object({
 
 if (raw.PAYPAL_ENV !== 'sandbox') {
   throw new Error('PlanLock permits PAYPAL_ENV=sandbox only. Live mode is intentionally rejected.');
-}
-
-const frontendPort = new URL(raw.ALLOWED_FRONTEND_ORIGIN).port || (raw.ALLOWED_FRONTEND_ORIGIN.startsWith('https:') ? '443' : '80');
-if (String(raw.BACKEND_PORT) === frontendPort) {
-  throw new Error('BACKEND_PORT must differ from the frontend origin port. Use 3001 for the documented local setup.');
 }
 
 const hasClientId = Boolean(raw.PAYPAL_CLIENT_ID);
@@ -66,11 +65,10 @@ if (!raw.LOCAL_SESSION_SECRET) {
 }
 if (raw.NODE_ENV === 'production' && !raw.DATABASE_URL) configurationErrors.push('DATABASE_URL is required in production. Render PostgreSQL is the supported deployed datastore.');
 if (raw.NODE_ENV === 'production' && !raw.LOCAL_SESSION_SECRET) configurationErrors.push('LOCAL_SESSION_SECRET is required in production.');
-if (raw.NODE_ENV === 'production') configurationErrors.push('A PostgreSQL runtime repository is required before this SQLite-backed build can become deployment-ready. Migrations and transfer tooling alone do not make ephemeral SQLite safe.');
 if (Boolean(raw.RENDER_API_KEY) !== Boolean(raw.RENDER_WORKFLOW_TASK)) configurationErrors.push('Set both RENDER_API_KEY and RENDER_WORKFLOW_TASK to dispatch persistent recovery work to Render Workflows.');
 
 export const config = {
-  port: raw.BACKEND_PORT,
+  port: raw.PORT ?? raw.BACKEND_PORT,
   allowedOrigin: raw.ALLOWED_FRONTEND_ORIGIN,
   environment: raw.NODE_ENV,
   sessionSecret: raw.LOCAL_SESSION_SECRET ?? randomBytes(32).toString('hex'),
@@ -83,7 +81,7 @@ export const config = {
     sellerMerchantId: raw.PAYPAL_SELLER_MERCHANT_ID
   },
   databaseUrl: raw.DATABASE_URL,
-  productionReady: raw.NODE_ENV !== 'production',
+  productionReady: raw.NODE_ENV !== 'production' || Boolean(raw.DATABASE_URL && raw.LOCAL_SESSION_SECRET),
   render: { configured: Boolean(raw.RENDER_API_KEY && raw.RENDER_WORKFLOW_TASK), apiKey: raw.RENDER_API_KEY, workflowTask: raw.RENDER_WORKFLOW_TASK },
   ai: {
     // A Gemini key must never be sent to Groq's OpenAI-compatible endpoint. Prefer Gemini when
@@ -95,3 +93,10 @@ export const config = {
   },
   configurationErrors
 };
+
+/** Prevent an accidental Render deployment from falling back to ephemeral SQLite storage. */
+export function assertProductionStorageReady(): void {
+  if (config.environment === 'production' && !config.productionReady) {
+    throw new Error('Production startup is blocked: DATABASE_URL and LOCAL_SESSION_SECRET are required. SQLite is local-development-only.');
+  }
+}

@@ -13,11 +13,11 @@ If a supplier fails, PlanLock records the dependency break, pauses captures, ope
 ## How it was built
 
 - React, Vite, and TypeScript for the plan workspace and demo scenarios.
-- Express and SQLite for local session-scoped plans, reservations, payments, recovery records, and replay-safe provider events.
+- PostgreSQL runtime repositories for durable session-scoped plans, reservations, payments, recovery records, and replay-safe provider events, with SQLite retained for explicit local demo mode.
 - PayPal Sandbox REST/JavaScript integration for authorization, capture, void, refund, and webhook verification paths.
 - Groq or Gemini server-side adapters for constrained plan proposals; deterministic server validation remains the decision maker.
-- AG Studio for embedded plan intelligence, linked data sources, a custom Recovery progress widget, and a read-only Studio Agent Framework runner.
-- Render blueprint/workflow code and PostgreSQL migrations as preparation for a future durable deployment; the runtime database port is intentionally unfinished.
+- AG Studio for embedded plan intelligence, linked data sources, a custom Recovery progress widget, and a read-only Studio Agent Framework runner. A configured model selects only an allowlisted lookup topic; the server renders the factual answer.
+- A combined Render web-service/workflow/PostgreSQL blueprint, advisory-lock migration runner, and production guard that refuses SQLite fallback.
 
 ## Challenges
 
@@ -29,7 +29,7 @@ The main challenge was preserving the difference between a plan decision and a p
 - Supplier failure is committed to a durable local outbox before recovery dispatch, and recovery jobs/actions use claims and idempotency keys.
 - Financial summaries separately show planned cost, authorized-but-uncaptured funds, captured funds, completed refunds, and pending refunds.
 - AG Studio receives linked read-only plan, dependency, payment, recovery, and alternative data; the custom widget surfaces persisted recovery state.
-- The test suite has 24 passing server tests covering validation, payment/recovery safety cases, provider-event replay, and scenario boundaries.
+- The test suite has 26 passing server tests covering validation, payment/recovery safety cases, provider-event replay, scenario boundaries, session isolation, and analyst-topic validation.
 
 ## Lessons learned
 
@@ -37,9 +37,8 @@ Payments must be treated as provider-confirmed facts rather than browser outcome
 
 ## Future improvements
 
-The next technical milestone is replacing runtime SQLite repositories with PostgreSQL repositories, then performing approved Render deployment and public HTTPS webhook tests. Additional work includes browser-level accessibility/E2E coverage, a deployed background worker, authenticated user accounts, live supplier integrations, and a server-side LLM that can explain—but never execute—read-only plan analysis.
+The next technical milestone is running the PostgreSQL integration suite, then performing approved Render deployment and public HTTPS webhook tests. Additional work includes browser-level accessibility/E2E coverage, a deployed background worker, authenticated user accounts, and live supplier integrations.
 
 ## Accuracy note
 
-Supplier inventory and backup alternatives are simulations. PayPal is Sandbox-only. Render is not deployed. The Studio Agent Framework runner is real but its current answers are deterministic, backend-grounded read-only summaries rather than a provider-backed dashboard LLM. See [readiness.md](readiness.md) for evidence and limitations.
-
+Supplier inventory and backup alternatives are simulations. PayPal is Sandbox-only. Render is not deployed. The Studio Agent Framework runner is real: a configured model chooses only an allowlisted lookup topic, while the backend produces grounded, read-only facts. See [readiness.md](readiness.md) for evidence and limitations.

@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Bot, CalendarDays, CheckCircle2, CircleDollarSign, Clock3, ListChecks, PackageCheck, RefreshCw, Sparkles } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Bot, CalendarDays, CheckCircle2, CircleDollarSign, ListChecks, PackageCheck, RefreshCw, Sparkles } from 'lucide-react';
 import { api, type AlternativePlan, type Offering, type Plan, type PlanInput, type PlannerProposal, type ServiceCategory } from '@/api';
 import { Badge, Button, Card, CardContent, CardHeader } from '@/components/ui';
 import { PlanCheckout } from '@/components/PlanCheckout';
@@ -9,8 +9,8 @@ import { RecoveryView } from '@/components/RecoveryView';
 const AgStudioDashboard = lazy(() => import('@/components/AgStudioDashboard'));
 
 type Draft = Omit<PlanInput, 'budgetCents'> & { budget: string };
+type WorkspaceSection = 'overview' | 'suppliers' | 'payments' | 'alternatives' | 'activity';
 
-const sampleRequest = 'Organize a dessert stall under $600. I need electricity, refrigeration, and delivery before 8 a.m.';
 const defaultRequirements = (): Draft['requiredServices'] => [
   { service: 'STALL', required: true }, { service: 'REFRIGERATION', required: true }, { service: 'DELIVERY', required: true }
 ];
@@ -18,44 +18,90 @@ const blankDraft = (): Draft => ({
   userRequest: '', eventDate: '', openingTime: '', timezone: '', budget: '600', currency: 'USD', requiredServices: defaultRequirements(),
   constraints: { requiresElectricity: true, deliveryDeadline: '08:00' }, selectedOfferingIds: []
 });
-
 const money = (cents: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(cents / 100);
-const fmt = (value: string) => new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
-const formTime = (date: Date) => Math.max(0, Math.floor((date.getTime() - Date.now()) / 1000));
-const duration = (seconds: number) => `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+const words = (value: string) => value.replaceAll('_', ' ').toLowerCase();
 const categoryLabel: Record<ServiceCategory, string> = { STALL: 'Stall', REFRIGERATION: 'Refrigeration', DELIVERY: 'Delivery' };
+const tabs: Array<{ id: WorkspaceSection; label: string }> = [
+  { id: 'overview', label: 'Overview' }, { id: 'suppliers', label: 'Suppliers & dependencies' }, { id: 'payments', label: 'Reservations & payments' }, { id: 'alternatives', label: 'What-if & alternatives' }, { id: 'activity', label: 'Activity' }
+];
 
-function PlanStatus({ plan }: { plan: Plan }) {
-  const tone = plan.status === 'RESERVED' ? 'bg-emerald-100 text-emerald-800' : plan.validationIssues.length ? 'bg-rose-100 text-rose-800' : 'bg-teal-100 text-teal-800';
-  return <Badge className={tone}>{plan.status.replace('_', ' ')}</Badge>;
+function plannedTotal(plan: Plan) { return plan.items.reduce((total, item) => total + item.offering.priceCents * item.quantity, 0); }
+function planStatusTone(plan: Plan) { return plan.status === 'RESERVED' ? 'bg-emerald-100 text-emerald-800' : plan.validationIssues.length ? 'bg-rose-100 text-rose-800' : plan.approvalState === 'APPROVED' ? 'bg-teal-100 text-teal-800' : 'bg-slate-100 text-slate-700'; }
+function requirementCoverage(plan: Plan) { return plan.requiredServices.filter((requirement) => requirement.required && plan.items.some((item) => item.offering.serviceCategory === requirement.service)).length; }
+
+function blockingIssue(plan: Plan): string {
+  if (plan.validationIssues.length) return plan.validationIssues[0].explanation;
+  if (plan.approvalState !== 'APPROVED') return 'This version needs customer approval before any reservation can be made.';
+  if (plan.status !== 'RESERVED') return 'Inventory has not been reserved yet.';
+  return 'No plan-level blocker. Supplier payments still need their own approval.';
+}
+
+function nextStep(plan: Plan): string {
+  if (plan.validationIssues.length) return 'Review supplier requirements and resolve the issue.';
+  if (plan.approvalState !== 'APPROVED') return 'Approve this validated plan version.';
+  if (plan.status !== 'RESERVED') return 'Reserve the selected supplier inventory.';
+  return 'Prepare, approve, then capture the linked supplier payments.';
 }
 
 function AlternativeRow({ alternative }: { alternative: AlternativePlan }) {
   const reasons = alternative.issues.map((issue) => issue.explanation).join(' ');
-  return <li className="border-t border-slate-100 py-3 first:border-0"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium text-navy-900">{alternative.label}</span><span className="font-semibold">{money(alternative.totalCents)}</span></div><p className={`mt-1 text-xs ${alternative.status === 'VALID' ? 'text-teal-700' : 'text-rose-700'}`}>{alternative.status === 'VALID' ? 'Valid alternative' : `Rejected: ${reasons}`}</p></li>;
+  return <li className="border-t border-slate-100 py-3 first:border-0"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium text-navy-900">{alternative.label}</span><span className="font-semibold">{money(alternative.totalCents)}</span></div><p className={`mt-1 text-xs ${alternative.status === 'VALID' ? 'text-teal-700' : 'text-rose-700'}`}>{alternative.status === 'VALID' ? 'Valid alternative; use it only as a proposed revision.' : `Rejected: ${reasons}`}</p></li>;
 }
 
-function nextStep(plan: Plan): string {
-  if (plan.validationIssues.length) return 'Resolve the listed dependency or budget issues before approval.';
-  if (plan.approvalState !== 'APPROVED') return 'Review the validated plan, then approve this exact version.';
-  if (plan.status !== 'RESERVED') return 'Reserve the simulated supplier inventory before preparing payments.';
-  return 'Prepare linked supplier payments, approve each Sandbox order, then capture to confirm the booking.';
+function SupplierReview({ draft, catalogue, totalCents, busy, aiConfigured, proposal, onDraft, onSave, onAi }: {
+  draft: Draft; catalogue: Offering[]; totalCents: number; busy: boolean; aiConfigured: boolean; proposal: PlannerProposal | null;
+  onDraft: (next: Draft | ((current: Draft) => Draft)) => void; onSave: () => void; onAi: () => void;
+}) {
+  const setRequired = (service: ServiceCategory, required: boolean) => onDraft((current) => ({ ...current, requiredServices: current.requiredServices.map((entry) => entry.service === service ? { ...entry, required } : entry) }));
+  const toggleOffering = (offeringId: string) => onDraft((current) => ({ ...current, selectedOfferingIds: current.selectedOfferingIds.includes(offeringId) ? current.selectedOfferingIds.filter((id) => id !== offeringId) : [...current.selectedOfferingIds, offeringId], dependencies: undefined }));
+  return <div className="grid gap-6 xl:grid-cols-[.9fr_1.1fr]">
+    <Card><CardHeader><div className="flex items-start justify-between gap-4"><div><h2 className="font-bold">Requirements</h2><p className="mt-1 text-sm text-slate-600">Describe the event in plain language, then set the details PlanLock cannot safely assume.</p></div><Badge className="bg-slate-100 text-slate-700">Manual review</Badge></div></CardHeader><CardContent><div className="space-y-5">
+      <label className="block text-sm font-medium text-navy-900">Plan name and event requirements<textarea className="mt-2 min-h-28 w-full rounded-lg border border-slate-200 p-3 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100" value={draft.userRequest} onChange={(event) => onDraft({ ...draft, userRequest: event.target.value })} placeholder="For example: Dessert stall for Saturday market with cold display and delivery before opening." /></label>
+      <div className="grid gap-4 sm:grid-cols-2"><label className="text-sm font-medium text-navy-900">Event date<input className="mt-2 h-10 w-full rounded-lg border border-slate-200 px-3 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100" type="date" value={draft.eventDate} onChange={(event) => onDraft({ ...draft, eventDate: event.target.value })} /></label><label className="text-sm font-medium text-navy-900">Opening time<input className="mt-2 h-10 w-full rounded-lg border border-slate-200 px-3 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100" type="time" value={draft.openingTime} onChange={(event) => onDraft({ ...draft, openingTime: event.target.value })} /></label></div>
+      <div className="grid gap-4 sm:grid-cols-2"><label className="text-sm font-medium text-navy-900">Timezone<select className="mt-2 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100" value={draft.timezone} onChange={(event) => onDraft({ ...draft, timezone: event.target.value })}><option value="">Select timezone</option><option value="Asia/Kolkata">Asia/Kolkata</option><option value="UTC">UTC</option><option value="America/New_York">America/New_York</option><option value="Europe/London">Europe/London</option></select></label><label className="text-sm font-medium text-navy-900">Budget (USD)<input className="mt-2 h-10 w-full rounded-lg border border-slate-200 px-3 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100" type="number" min="1" step="1" value={draft.budget} onChange={(event) => onDraft({ ...draft, budget: event.target.value })} /></label></div>
+      <fieldset><legend className="text-sm font-semibold text-navy-900">Required services</legend><div className="mt-3 flex flex-wrap gap-2">{draft.requiredServices.map((entry) => <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm transition hover:border-teal-300" key={entry.service}><input className="accent-teal-600" type="checkbox" checked={entry.required} onChange={(event) => setRequired(entry.service, event.target.checked)} />{categoryLabel[entry.service]}</label>)}</div></fieldset>
+      <fieldset className="rounded-xl bg-slate-50 p-4"><legend className="px-1 text-sm font-semibold text-navy-900">Dependencies</legend><label className="mt-2 flex items-center gap-2 text-sm"><input className="accent-teal-600" type="checkbox" checked={draft.constraints.requiresElectricity} onChange={(event) => onDraft({ ...draft, constraints: { ...draft.constraints, requiresElectricity: event.target.checked } })} />Electricity is required</label><label className="mt-3 block text-sm font-medium text-navy-900">Delivery deadline<input className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100" type="time" value={draft.constraints.deliveryDeadline ?? ''} onChange={(event) => onDraft({ ...draft, constraints: { ...draft.constraints, deliveryDeadline: event.target.value || null } })} /></label></fieldset>
+      {draft.dependencies?.length ? <div className="rounded-xl border border-slate-200 p-4"><p className="text-sm font-semibold text-navy-900">Saved dependency links</p>{draft.dependencies.map((dependency) => <label className="mt-2 flex items-start gap-2 text-sm" key={dependency.id}><input className="mt-1 accent-teal-600" type="checkbox" checked onChange={() => onDraft((current) => ({ ...current, dependencies: current.dependencies?.filter((edge) => edge.id !== dependency.id) }))} /><span>{dependency.explanation}</span></label>)}<Button className="mt-3" size="sm" type="button" variant="outline" onClick={() => onDraft((current) => ({ ...current, dependencies: undefined }))}>Rebuild links from selection</Button></div> : null}
+      <div className="flex flex-wrap gap-3"><Button disabled={busy || !draft.userRequest.trim()} onClick={onSave}>{busy ? 'Saving…' : 'Save and revalidate'}</Button><Button variant="outline" disabled={busy || !aiConfigured} title={aiConfigured ? 'Request an AI-assisted proposal for review' : 'AI is not configured on this PlanLock server'} onClick={onAi}><Bot className="size-4" />{aiConfigured ? 'Suggest with AI' : 'AI unavailable'}</Button></div>
+    </div></CardContent></Card>
+    <Card><CardHeader><div className="flex items-center gap-3"><span className="grid size-9 place-items-center rounded-lg bg-teal-50 text-teal-700"><ListChecks className="size-4" /></span><div><h2 className="font-bold">Suppliers and dependencies</h2><p className="text-sm text-slate-600">Availability, capabilities, arrival times, and prices come from the server.</p></div></div></CardHeader><CardContent><div className="space-y-3">{catalogue.map((offering) => <label className={`block rounded-xl border p-4 transition ${draft.selectedOfferingIds.includes(offering.id) ? 'border-teal-300 bg-teal-50/60' : 'border-slate-200 hover:border-teal-200'} ${offering.availabilityStatus === 'UNAVAILABLE' ? 'opacity-60' : ''}`} key={offering.id}><div className="flex items-start gap-3"><input className="mt-1 accent-teal-600" type="checkbox" checked={draft.selectedOfferingIds.includes(offering.id)} disabled={offering.availabilityStatus !== 'AVAILABLE'} onChange={() => toggleOffering(offering.id)} /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center justify-between gap-2"><p className="font-semibold text-navy-900">{offering.name}</p><span className="font-bold">{money(offering.priceCents)}</span></div><p className="mt-1 text-xs text-slate-600">{offering.supplierName} · {categoryLabel[offering.serviceCategory]} · capacity {offering.capacity}</p><p className="mt-1 text-xs text-slate-600">{offering.capabilities.length ? `Provides: ${offering.capabilities.join(', ')}` : offering.requirements.map((requirement) => `Requires: ${requirement.capability}`).join(', ') || 'No additional capabilities'}</p>{offering.slots[0]?.arrivalTime && <p className="mt-1 text-xs font-medium text-teal-700">Arrives {offering.slots[0].arrivalTime}</p>}{offering.availabilityStatus === 'UNAVAILABLE' && <p className="mt-1 text-xs font-medium text-rose-700">Unavailable according to the current catalogue.</p>}</div></div></label>)}</div><div className="mt-5 flex items-center justify-between rounded-xl bg-navy-950 p-4 text-white"><span className="text-sm text-slate-200">Planned selection</span><span className="text-xl font-bold">{money(totalCents)}</span></div></CardContent></Card>
+    {proposal && <Card className="xl:col-span-2 border-violet-200 bg-violet-50/40"><CardHeader><div className="flex items-center gap-3"><Sparkles className="size-5 text-violet-700" /><div><h2 className="font-bold">AI-assisted proposal — review required</h2><p className="text-sm text-slate-600">This suggestion cannot reserve inventory, approve the plan, or execute payments.</p></div></div></CardHeader><CardContent><p className="text-sm text-slate-700">{proposal.explanation}</p>{proposal.missingInformation.length > 0 && <p className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-900">Missing information: {proposal.missingInformation.join(', ')}</p>}</CardContent></Card>}
+  </div>;
 }
 
-export function PlanWorkspace({ selectedPlanId, onPlanSelected, startNew = false }: { selectedPlanId?: string | null; onPlanSelected?: (id: string | null) => void; startNew?: boolean }) {
+function PlanOverview({ plan, busy, onApprove, onReserve, onReview }: { plan: Plan; busy: boolean; onApprove: () => void; onReserve: () => void; onReview: () => void }) {
+  const coverage = requirementCoverage(plan);
+  const required = plan.requiredServices.filter((requirement) => requirement.required).length;
+  const reservation = plan.reservations.find((record) => record.state === 'ACTIVE');
+  const primary = plan.validationIssues.length ? <Button onClick={onReview}>Review supplier requirements</Button> : plan.approvalState !== 'APPROVED' ? <Button disabled={busy} onClick={onApprove}><CheckCircle2 className="size-4" />Approve plan version {plan.version}</Button> : plan.status !== 'RESERVED' ? <Button disabled={busy} onClick={onReserve}><PackageCheck className="size-4" />Reserve supplier inventory</Button> : <Button onClick={onReview}>Continue to payments</Button>;
+  return <div className="space-y-6">
+    <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><Card><CardContent><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Event</p><p className="mt-2 font-semibold text-navy-950">{plan.eventDate} · {plan.openingTime}</p><p className="mt-1 text-sm text-slate-600">{plan.timezone}</p></CardContent></Card><Card><CardContent><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Budget / planned</p><p className="mt-2 font-semibold text-navy-950">{money(plan.budgetCents)} / {money(plannedTotal(plan))}</p><p className="mt-1 text-sm text-slate-600">Server-calculated supplier selection</p></CardContent></Card><Card><CardContent><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Requirement coverage</p><p className="mt-2 font-semibold text-navy-950">{coverage} of {required} covered</p><p className="mt-1 text-sm text-slate-600">{plan.dependencies.length} linked dependency{plan.dependencies.length === 1 ? '' : 'ies'}</p></CardContent></Card><Card><CardContent><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Reservation / booking</p><p className="mt-2 font-semibold text-navy-950">{reservation ? 'Inventory reserved' : 'Not reserved'}</p><p className="mt-1 text-sm text-slate-600">{reservation ? `Expires ${new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(reservation.expiresAt))}` : 'Payments cannot start before reservation.'}</p></CardContent></Card></section>
+    <Card className={plan.validationIssues.length ? 'border-rose-200' : 'border-teal-200'}><CardHeader><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-sm font-semibold uppercase tracking-[.14em] text-teal-700">Next action</p><h2 className="mt-1 text-xl font-bold text-navy-950">{nextStep(plan)}</h2></div><Badge className={planStatusTone(plan)}>{words(plan.status)}</Badge></div></CardHeader><CardContent>{plan.validationIssues.length ? <div className="space-y-3">{plan.validationIssues.map((issue) => <div className="rounded-lg border border-rose-200 bg-rose-50 p-3" key={`${issue.ruleCode}:${issue.itemIds.join(':')}`}><p className="text-sm font-semibold text-rose-800">{words(issue.ruleCode)}</p><p className="mt-1 text-sm text-rose-700">{issue.explanation}</p></div>)}</div> : <div className="rounded-xl bg-teal-50 p-4 text-sm text-teal-950"><CheckCircle2 className="mr-2 inline size-4 text-teal-700" />All current deterministic plan checks pass. Approval, reservation, payment approval, and capture remain separate steps.</div>}<div className="mt-5">{primary}</div></CardContent></Card>
+    <Card><CardHeader><h2 className="font-bold">Attention</h2></CardHeader><CardContent><p className="rounded-lg bg-slate-50 p-4 text-sm text-slate-700"><AlertTriangle className="mr-2 inline size-4 text-amber-600" />{blockingIssue(plan)}</p></CardContent></Card>
+  </div>;
+}
+
+function PlanActivity({ plan }: { plan: Plan }) {
+  return <div className="space-y-6"><Card><CardHeader><div className="flex items-center gap-3"><CalendarDays className="size-5 text-teal-700" /><div><h2 className="font-bold">Activity</h2><p className="text-sm text-slate-600">A chronological record for this plan version.</p></div></div></CardHeader><CardContent>{plan.events.length ? <ol className="relative ml-2 border-l border-slate-200 pl-6">{plan.events.map((event) => <li className="relative pb-5 last:pb-0" key={event.id}><span className="absolute -left-[31px] top-1 size-3 rounded-full border-2 border-white bg-teal-500" /><p className="text-sm font-medium text-navy-900">{event.message}</p><time className="mt-1 block text-xs text-slate-500">{new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(event.createdAt))}</time></li>)}</ol> : <p className="rounded-lg bg-slate-50 p-4 text-sm text-slate-600">No plan activity has been recorded yet.</p>}</CardContent></Card><Suspense fallback={<Card><CardContent><p className="py-4 text-sm text-slate-500">Loading analyst workspace…</p></CardContent></Card>}><AgStudioDashboard plan={plan} /></Suspense></div>;
+}
+
+export function PlanWorkspace({ selectedPlanId, onPlanSelected, startNew = false, onReturnToPlans }: { selectedPlanId?: string | null; onPlanSelected?: (id: string | null) => void; startNew?: boolean; onReturnToPlans: () => void }) {
   const [catalogue, setCatalogue] = useState<Offering[]>([]);
   const [activePlan, setActivePlan] = useState<Plan | null>(null);
   const [draft, setDraft] = useState<Draft>(blankDraft);
+  const [section, setSection] = useState<WorkspaceSection>('overview');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [pageError, setPageError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [aiConfigured, setAiConfigured] = useState(false);
   const [proposal, setProposal] = useState<PlannerProposal | null>(null);
-  const [, setTick] = useState(0);
 
   const load = useCallback(async () => {
-    const [catalogueResult, planResult, config] = await Promise.all([api.catalogue(), api.plans(), api.config()]);
-    setCatalogue(catalogueResult.offerings); setAiConfigured(config.ai.configured);
+    const config = await api.config();
+    setAiConfigured(config.ai.configured);
+    const [catalogueResult, planResult] = await Promise.all([api.catalogue(), api.plans()]);
+    setCatalogue(catalogueResult.offerings);
     setActivePlan((current) => {
       const requested = selectedPlanId ? planResult.plans.find((plan) => plan.id === selectedPlanId) : null;
       if (startNew && !selectedPlanId && !current) return null;
@@ -63,97 +109,32 @@ export function PlanWorkspace({ selectedPlanId, onPlanSelected, startNew = false
     });
   }, [selectedPlanId, startNew]);
 
-  useEffect(() => { void load().catch((reason) => setError(reason instanceof Error ? reason.message : 'Unable to load planning data.')).finally(() => setLoading(false)); }, [load]);
-  useEffect(() => { const timer = window.setInterval(() => setTick((value) => value + 1), 1_000); return () => window.clearInterval(timer); }, []);
-  useEffect(() => {
-    if (!activePlan) return;
-    setDraft({
-      userRequest: activePlan.userRequest, eventDate: activePlan.eventDate, openingTime: activePlan.openingTime, timezone: activePlan.timezone,
-      budget: (activePlan.budgetCents / 100).toFixed(0), currency: 'USD', requiredServices: activePlan.requiredServices,
-      constraints: activePlan.constraints, selectedOfferingIds: activePlan.selectedOfferingIds, dependencies: activePlan.dependencies
-    });
-  }, [activePlan?.id, activePlan?.version]);
+  const reload = useCallback(async () => { setLoading(true); setPageError(null); try { await load(); } catch (reason) { setPageError(reason instanceof Error ? reason.message : 'PlanLock could not load the planning service.'); } finally { setLoading(false); } }, [load]);
+  useEffect(() => { void reload(); }, [reload]);
+  useEffect(() => { if (activePlan) setDraft({ userRequest: activePlan.userRequest, eventDate: activePlan.eventDate, openingTime: activePlan.openingTime, timezone: activePlan.timezone, budget: (activePlan.budgetCents / 100).toFixed(0), currency: 'USD', requiredServices: activePlan.requiredServices, constraints: activePlan.constraints, selectedOfferingIds: activePlan.selectedOfferingIds, dependencies: activePlan.dependencies }); }, [activePlan?.id, activePlan?.version]);
   useEffect(() => { onPlanSelected?.(activePlan?.id ?? null); }, [activePlan?.id, onPlanSelected]);
 
   const totalCents = useMemo(() => catalogue.filter((offering) => draft.selectedOfferingIds.includes(offering.id)).reduce((total, offering) => total + offering.priceCents, 0), [catalogue, draft.selectedOfferingIds]);
-  const activeReservation = activePlan?.reservations.find((reservation) => reservation.state === 'ACTIVE') ?? null;
+  const missingDetails = useMemo(() => [!draft.userRequest.trim() && 'plan name and event requirements', !draft.eventDate && 'event date', !draft.openingTime && 'opening time', !draft.timezone && 'timezone', !(Number(draft.budget) > 0) && 'a positive budget', draft.selectedOfferingIds.length === 0 && 'at least one supplier offering'].filter(Boolean) as string[], [draft]);
+  const inputFromDraft = useCallback((): PlanInput => ({ userRequest: draft.userRequest.trim(), eventDate: draft.eventDate, openingTime: draft.openingTime, timezone: draft.timezone, budgetCents: Math.round(Number(draft.budget) * 100), currency: 'USD', requiredServices: draft.requiredServices, constraints: draft.constraints, selectedOfferingIds: draft.selectedOfferingIds, dependencies: draft.dependencies }), [draft]);
+  const mutatePlan = async (operation: () => Promise<{ plan: Plan }>) => { setBusy(true); setActionError(null); try { const { plan } = await operation(); setActivePlan(plan); return plan; } catch (reason) { setActionError(reason instanceof Error ? reason.message : 'Plan action failed. Your entered values are still here.'); return null; } finally { setBusy(false); } };
+  const saveOrCreate = async () => { if (missingDetails.length) { setActionError(`Before continuing, add ${missingDetails.join(', ')}.`); return; } const plan = await mutatePlan(() => activePlan ? api.updatePlan(activePlan.id, { eventDate: draft.eventDate, openingTime: draft.openingTime, timezone: draft.timezone, budgetCents: Math.round(Number(draft.budget) * 100), requiredServices: draft.requiredServices, constraints: draft.constraints, selectedOfferingIds: draft.selectedOfferingIds, dependencies: draft.dependencies }) : api.createPlan(inputFromDraft())); if (plan) { setProposal(null); setSection(activePlan ? 'overview' : 'suppliers'); } };
+  const runAi = async () => { if (!activePlan) return; setBusy(true); setActionError(null); try { setProposal((await api.aiProposal(activePlan.id)).proposal); } catch (reason) { setActionError(reason instanceof Error ? reason.message : 'The AI-assisted proposal could not be created.'); } finally { setBusy(false); } };
+  const useReferenceExample = () => { const nextDate = new Date(); nextDate.setDate(nextDate.getDate() + 21); setDraft((current) => ({ ...current, userRequest: 'Dessert stall with electricity, refrigeration, and delivery before opening.', eventDate: nextDate.toISOString().slice(0, 10), openingTime: '09:00', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', budget: '600', requiredServices: defaultRequirements(), constraints: { requiresElectricity: true, deliveryDeadline: '08:00' }, selectedOfferingIds: ['riverside-stall', 'refrigerated-display', 'morning-delivery'] })); setActionError(null); };
 
-  const updatePlan = async (operation: () => Promise<{ plan: Plan }>) => {
-    setBusy(true); setError(null);
-    try {
-      const { plan } = await operation();
-      setActivePlan(plan); return plan;
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Plan action failed.'); return null; }
-    finally { setBusy(false); }
-  };
+  if (loading) return <Card><CardContent><div className="flex items-center gap-3 py-10 text-sm text-slate-600"><RefreshCw className="size-4 animate-spin text-teal-700" />Loading your plan and the current supplier catalogue…</div></CardContent></Card>;
+  if (pageError) return <Card className="border-rose-200"><CardContent><div role="alert" className="flex gap-3 py-4 text-sm text-rose-800"><AlertTriangle className="mt-0.5 size-5 shrink-0" /><div><p className="font-semibold">Planning service unavailable</p><p className="mt-1">{pageError}</p><Button className="mt-3" size="sm" variant="outline" onClick={() => void reload()}><RefreshCw className="size-3" />Retry loading</Button><details className="mt-3 text-xs text-rose-700"><summary className="cursor-pointer font-medium">Diagnostic detail</summary><p className="mt-1">PlanLock needs the API, database, catalogue, and configuration endpoint to be available. No supplier results are shown until the request succeeds.</p></details></div></div></CardContent></Card>;
 
-  const inputFromDraft = (): PlanInput => ({
-    userRequest: draft.userRequest.trim(), eventDate: draft.eventDate, openingTime: draft.openingTime, timezone: draft.timezone,
-    budgetCents: Math.round(Number(draft.budget) * 100), currency: 'USD', requiredServices: draft.requiredServices,
-    constraints: draft.constraints, selectedOfferingIds: draft.selectedOfferingIds, dependencies: draft.dependencies
-  });
+  if (!activePlan) return <div className="space-y-6"><section className="flex flex-wrap items-end justify-between gap-4"><div className="max-w-2xl"><Button size="sm" variant="ghost" onClick={onReturnToPlans}><ArrowLeft className="size-4" />My Plans</Button><p className="mt-5 text-sm font-semibold uppercase tracking-[.16em] text-teal-700">Create plan</p><h1 className="mt-2 text-3xl font-bold tracking-tight text-navy-950 sm:text-4xl">Start with the event, then review suppliers.</h1><p className="mt-3 leading-7 text-slate-600">PlanLock will preserve what you enter and show missing details before it creates a plan. AI assistance is optional and is only available after a plan exists.</p></div><Button size="sm" variant="outline" onClick={useReferenceExample}>Use $540 reference example</Button></section>{actionError && <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800"><AlertTriangle className="mr-2 inline size-4" />{actionError}</div>}<SupplierReview draft={draft} catalogue={catalogue} totalCents={totalCents} busy={busy} aiConfigured={false} proposal={null} onDraft={setDraft} onSave={() => void saveOrCreate()} onAi={() => undefined} /><Card className="border-teal-200"><CardContent><div className="flex flex-wrap items-center justify-between gap-4"><div><p className="font-semibold text-navy-950">Ready to create this plan?</p><p className="mt-1 text-sm text-slate-600">{missingDetails.length ? `Still needed: ${missingDetails.join(', ')}.` : 'The next step creates the plan and runs the server validation.'}</p></div><Button disabled={busy || missingDetails.length > 0} onClick={() => void saveOrCreate()}>Create plan and validate</Button></div></CardContent></Card></div>;
 
-  const create = async () => {
-    if (!draft.eventDate || !draft.openingTime || !draft.timezone) { setError('Event date, opening time, and timezone are required before a plan can be created.'); return; }
-    const plan = await updatePlan(() => api.createPlan(inputFromDraft()));
-    if (plan) setProposal(null);
-  };
-  const save = async () => {
-    if (!activePlan) return;
-    const input = inputFromDraft();
-    await updatePlan(() => api.updatePlan(activePlan.id, {
-      eventDate: input.eventDate, openingTime: input.openingTime, timezone: input.timezone, budgetCents: input.budgetCents,
-      requiredServices: input.requiredServices, constraints: input.constraints, selectedOfferingIds: input.selectedOfferingIds, dependencies: input.dependencies
-    }));
-  };
-  const runAi = async () => {
-    if (!activePlan) return;
-    setBusy(true); setError(null);
-    try { setProposal((await api.aiProposal(activePlan.id)).proposal); await load(); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : 'The AI proposal could not be created.'); }
-    finally { setBusy(false); }
-  };
-  const sample = () => setDraft((current) => ({
-    ...current, userRequest: sampleRequest, budget: '600', requiredServices: defaultRequirements(), constraints: { requiresElectricity: true, deliveryDeadline: '08:00' },
-    selectedOfferingIds: ['riverside-stall', 'refrigerated-display', 'morning-delivery']
-  }));
-  const setRequired = (service: ServiceCategory, required: boolean) => setDraft((current) => ({ ...current, requiredServices: current.requiredServices.map((entry) => entry.service === service ? { ...entry, required } : entry) }));
-  const toggleOffering = (offeringId: string) => setDraft((current) => ({ ...current, selectedOfferingIds: current.selectedOfferingIds.includes(offeringId) ? current.selectedOfferingIds.filter((id) => id !== offeringId) : [...current.selectedOfferingIds, offeringId], dependencies: undefined }));
-
-  if (loading) return <Card><CardContent><p className="py-8 text-sm text-slate-500">Loading the simulated supplier catalogue…</p></CardContent></Card>;
-
-  return <div className="space-y-6">
-    <section className="max-w-3xl"><p className="text-sm font-semibold uppercase tracking-[.16em] text-teal-700">Plan workspace</p><h1 className="mt-2 text-3xl font-bold tracking-tight text-navy-950 sm:text-4xl">Build, reserve, and confirm a plan.</h1><p className="mt-3 leading-7 text-slate-600">Every offering can be available individually. PlanLock checks the connected plan before a supplier reservation or payment action is allowed.</p></section>
-    {error && <div role="alert" className="flex gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800"><AlertTriangle className="mt-0.5 size-5 shrink-0" /><div><p className="font-semibold">Action needs attention</p><p className="mt-1">{error}</p></div></div>}
-
-    <div className="grid gap-6 xl:grid-cols-[1.05fr_.95fr]">
-      <Card><CardHeader><div className="flex items-center justify-between gap-4"><div><h2 className="font-bold">{activePlan ? 'Review plan' : 'Create plan'}</h2><p className="mt-1 text-sm text-slate-600">Dates and timezones are required; PlanLock does not silently infer them.</p></div><Button type="button" size="sm" variant="outline" onClick={sample}>Use sample request</Button></div></CardHeader><CardContent><div className="space-y-5">
-        <label className="block text-sm font-medium text-navy-900">Event request<textarea className="mt-2 min-h-24 w-full rounded-lg border border-slate-200 p-3 text-sm outline-none focus:border-teal-500" value={draft.userRequest} onChange={(event) => setDraft({ ...draft, userRequest: event.target.value })} placeholder="Describe the event and what it needs." /></label>
-        <div className="grid gap-4 sm:grid-cols-2"><label className="text-sm font-medium text-navy-900">Event date<input className="mt-2 h-10 w-full rounded-lg border border-slate-200 px-3" type="date" value={draft.eventDate} onChange={(event) => setDraft({ ...draft, eventDate: event.target.value })} /></label><label className="text-sm font-medium text-navy-900">Opening time<input className="mt-2 h-10 w-full rounded-lg border border-slate-200 px-3" type="time" value={draft.openingTime} onChange={(event) => setDraft({ ...draft, openingTime: event.target.value })} /></label></div>
-        <div className="grid gap-4 sm:grid-cols-2"><label className="text-sm font-medium text-navy-900">Timezone<select className="mt-2 h-10 w-full rounded-lg border border-slate-200 bg-white px-3" value={draft.timezone} onChange={(event) => setDraft({ ...draft, timezone: event.target.value })}><option value="">Select timezone</option><option value="Asia/Kolkata">Asia/Kolkata</option><option value="UTC">UTC</option><option value="America/New_York">America/New_York</option><option value="Europe/London">Europe/London</option></select></label><label className="text-sm font-medium text-navy-900">Budget (USD)<input className="mt-2 h-10 w-full rounded-lg border border-slate-200 px-3" type="number" min="1" step="1" value={draft.budget} onChange={(event) => setDraft({ ...draft, budget: event.target.value })} /></label></div>
-        <fieldset><legend className="text-sm font-semibold text-navy-900">Required services</legend><div className="mt-2 flex flex-wrap gap-3">{draft.requiredServices.map((entry) => <label className="flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm" key={entry.service}><input type="checkbox" checked={entry.required} onChange={(event) => setRequired(entry.service, event.target.checked)} />{categoryLabel[entry.service]}</label>)}</div></fieldset>
-        <fieldset className="rounded-xl bg-slate-50 p-4"><legend className="px-1 text-sm font-semibold text-navy-900">Constraints</legend><label className="mt-2 flex items-center gap-2 text-sm"><input type="checkbox" checked={draft.constraints.requiresElectricity} onChange={(event) => setDraft({ ...draft, constraints: { ...draft.constraints, requiresElectricity: event.target.checked } })} />Electricity is required</label><label className="mt-3 block text-sm font-medium text-navy-900">Delivery deadline<input className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3" type="time" value={draft.constraints.deliveryDeadline ?? ''} onChange={(event) => setDraft({ ...draft, constraints: { ...draft.constraints, deliveryDeadline: event.target.value || null } })} /></label></fieldset>
-        {draft.dependencies?.length ? <fieldset className="rounded-xl border border-slate-200 p-4"><legend className="px-1 text-sm font-semibold text-navy-900">Dependencies</legend>{draft.dependencies.map((dependency) => <label className="mt-2 flex items-start gap-2 text-sm" key={dependency.id}><input className="mt-1" type="checkbox" checked onChange={() => setDraft((current) => ({ ...current, dependencies: current.dependencies?.filter((edge) => edge.id !== dependency.id) }))} /><span>{dependency.explanation}</span></label>)}<Button className="mt-3" size="sm" type="button" variant="outline" onClick={() => setDraft((current) => ({ ...current, dependencies: undefined }))}>Rebuild dependencies from selection</Button></fieldset> : null}
-        <div className="flex flex-wrap gap-3"><Button disabled={busy || !draft.userRequest.trim()} onClick={() => void (activePlan ? save() : create())}>{activePlan ? 'Save and revalidate' : 'Create plan'}</Button>{activePlan && <Button variant="outline" disabled={busy || !aiConfigured} title={aiConfigured ? 'Generate an AI proposal for review' : 'Set GROQ_API_KEY to enable live proposals'} onClick={() => void runAi()}><Bot className="size-4" />{aiConfigured ? 'Propose with AI' : 'AI not configured'}</Button>}</div>
-      </div></CardContent></Card>
-
-      <Card><CardHeader><div className="flex items-center gap-3"><span className="grid size-9 place-items-center rounded-lg bg-teal-50 text-teal-700"><ListChecks className="size-4" /></span><div><h2 className="font-bold">Review offerings</h2><p className="text-sm text-slate-600">Simulated catalogue — prices and availability come from the server.</p></div></div></CardHeader><CardContent><div className="space-y-3">{catalogue.map((offering) => <label className={`block rounded-xl border p-4 ${draft.selectedOfferingIds.includes(offering.id) ? 'border-teal-300 bg-teal-50/50' : 'border-slate-200'} ${offering.availabilityStatus === 'UNAVAILABLE' ? 'opacity-60' : ''}`} key={offering.id}><div className="flex items-start gap-3"><input className="mt-1" type="checkbox" checked={draft.selectedOfferingIds.includes(offering.id)} disabled={offering.availabilityStatus !== 'AVAILABLE'} onChange={() => toggleOffering(offering.id)} /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center justify-between gap-2"><p className="font-semibold text-navy-900">{offering.name}</p><span className="font-bold">{money(offering.priceCents)}</span></div><p className="mt-1 text-xs text-slate-600">{offering.supplierName} · {categoryLabel[offering.serviceCategory]} · capacity {offering.capacity}</p><p className="mt-1 text-xs text-slate-600">{offering.capabilities.length ? `Provides: ${offering.capabilities.join(', ')}` : offering.requirements.map((requirement) => `Requires: ${requirement.capability}`).join(', ') || 'No additional capabilities'}</p>{offering.slots[0]?.arrivalTime && <p className="mt-1 text-xs font-medium text-teal-700">Arrives {offering.slots[0].arrivalTime}</p>}</div></div></label>)}</div><div className="mt-5 flex items-center justify-between rounded-xl bg-navy-950 p-4 text-white"><span className="text-sm text-slate-200">Current selection</span><span className="text-xl font-bold">{money(totalCents)}</span></div></CardContent></Card>
-    </div>
-
-    {proposal && <Card className="border-violet-200 bg-violet-50/40"><CardHeader><div className="flex items-center gap-3"><Sparkles className="size-5 text-violet-700" /><div><h2 className="font-bold">AI proposal — review required</h2><p className="text-sm text-slate-600">This is a proposal only. Server rules still decide availability, dependencies, and budget.</p></div></div></CardHeader><CardContent><p className="text-sm text-slate-700">{proposal.explanation}</p><p className="mt-3 text-sm font-medium">Suggested IDs: {proposal.candidateOfferingIds.join(', ')}</p>{proposal.missingInformation.length > 0 && <p className="mt-2 text-sm text-amber-800">Missing information: {proposal.missingInformation.join(', ')}</p>}</CardContent></Card>}
-
-    {activePlan && <>
-      <Card className="border-navy-200 bg-navy-950 text-white"><CardContent><div className="flex flex-wrap items-center justify-between gap-4"><div><p className="text-xs font-semibold uppercase tracking-[.14em] text-teal-200">Open plan</p><p className="mt-1 font-semibold">{activePlan.userRequest}</p><p className="mt-1 text-sm text-slate-300">Plan v{activePlan.version} · {activePlan.items.length} supplier items · {money(activePlan.budgetCents)} budget</p></div><div className="max-w-md text-sm text-teal-100"><span className="font-semibold">Next:</span> {nextStep(activePlan)}</div></div></CardContent></Card>
-      <div className="grid gap-6 lg:grid-cols-[1.05fr_.95fr]">
-        <Card><CardHeader><div className="flex items-center justify-between gap-4"><div><h2 className="font-bold">Validation and approval</h2><p className="text-sm text-slate-600">Version {activePlan.version} · approval {activePlan.approvalState.replace('_', ' ').toLowerCase()}</p></div><PlanStatus plan={activePlan} /></div></CardHeader><CardContent>{activePlan.validationIssues.length ? <ul className="space-y-3">{activePlan.validationIssues.map((issue) => <li className="rounded-lg border border-rose-200 bg-rose-50 p-3" key={`${issue.ruleCode}:${issue.itemIds.join(':')}`}><p className="text-sm font-semibold text-rose-800">{issue.ruleCode.replaceAll('_', ' ')}</p><p className="mt-1 text-sm text-rose-700">{issue.explanation}</p></li>)}</ul> : <div className="rounded-xl border border-teal-100 bg-teal-50 p-4 text-sm text-teal-900"><CheckCircle2 className="mr-2 inline size-4" />All deterministic checks pass. Review then approve before reserving.</div>}<div className="mt-5 flex flex-wrap gap-3"><Button disabled={busy || activePlan.validationIssues.length > 0 || activePlan.approvalState === 'APPROVED'} onClick={() => void updatePlan(() => api.approvePlan(activePlan.id))}><CheckCircle2 className="size-4" />Approve current plan</Button><Button disabled={busy || activePlan.approvalState !== 'APPROVED' || activePlan.status === 'RESERVED'} onClick={() => void updatePlan(() => api.reservePlan(activePlan.id))}><PackageCheck className="size-4" />Reserve simulated inventory</Button></div>{activeReservation && <p className="mt-4 rounded-lg bg-emerald-50 p-3 text-sm font-medium text-emerald-800"><Clock3 className="mr-2 inline size-4" />Reservation active for {duration(formTime(new Date(activeReservation.expiresAt)))} · expires {fmt(activeReservation.expiresAt)}</p>}</CardContent></Card>
-        <Card><CardHeader><div className="flex items-center gap-3"><RefreshCw className="size-5 text-teal-700" /><div><h2 className="font-bold">Alternatives</h2><p className="text-sm text-slate-600">Every combination is checked by the same deterministic validator.</p></div></div></CardHeader><CardContent><ul>{activePlan.alternatives.map((alternative) => <AlternativeRow alternative={alternative} key={alternative.id} />)}</ul></CardContent></Card>
-      </div>
-      <PlanCheckout plan={activePlan} onPlanRefresh={load} />
-      <RecoveryView plan={activePlan} />
-      <PlanWhatIf plan={activePlan} onApplied={load} />
-      <Suspense fallback={<Card><CardContent><p className="py-4 text-sm text-slate-500">Loading plan analytics…</p></CardContent></Card>}><AgStudioDashboard plan={activePlan} /></Suspense>
-      <Card><CardHeader><div className="flex items-center gap-3"><CalendarDays className="size-5 text-teal-700" /><div><h2 className="font-bold">Plan activity</h2><p className="text-sm text-slate-600">Chronological local record for this plan.</p></div></div></CardHeader><CardContent><ol className="relative ml-2 border-l border-slate-200 pl-6">{activePlan.events.map((event) => <li className="relative pb-5 last:pb-0" key={event.id}><span className="absolute -left-[31px] top-1 size-3 rounded-full border-2 border-white bg-teal-500" /><p className="text-sm font-medium text-navy-900">{event.message}</p><time className="mt-1 block text-xs text-slate-500">{fmt(event.createdAt)}</time></li>)}</ol></CardContent></Card>
-    </>}
+  return <div className="space-y-6"><section className="rounded-2xl bg-navy-950 px-5 py-5 text-white shadow-card sm:px-6"><div className="flex flex-wrap items-start justify-between gap-4"><div className="min-w-0"><Button size="sm" variant="ghost" className="-ml-3 text-slate-100 hover:bg-white/10 hover:text-white" onClick={onReturnToPlans}><ArrowLeft className="size-4" />My Plans</Button><p className="mt-3 text-xs font-semibold uppercase tracking-[.14em] text-teal-200">Open plan</p><h1 className="mt-1 max-w-3xl text-xl font-bold tracking-tight sm:text-2xl">{activePlan.userRequest}</h1><p className="mt-2 text-sm text-slate-300">{activePlan.eventDate} · {activePlan.openingTime} · {activePlan.timezone} · version {activePlan.version}</p></div><div className="min-w-52 rounded-xl bg-white/10 p-3 text-sm"><Badge className={planStatusTone(activePlan)}>{words(activePlan.status)}</Badge><p className="mt-2 text-teal-100"><span className="font-semibold text-white">Next:</span> {nextStep(activePlan)}</p></div></div></section>
+    <nav aria-label="Plan workspace sections" className="sticky top-2 z-10 -mx-1 overflow-x-auto rounded-xl border border-slate-200 bg-white/95 p-2 shadow-sm backdrop-blur"><div className="flex min-w-max gap-1">{tabs.map((tab) => <Button key={tab.id} size="sm" variant={section === tab.id ? 'default' : 'ghost'} aria-current={section === tab.id ? 'page' : undefined} onClick={() => setSection(tab.id)}>{tab.label}</Button>)}</div></nav>
+    {actionError && <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800"><AlertTriangle className="mr-2 inline size-4" />{actionError}<Button className="ml-3" size="sm" variant="outline" onClick={() => setActionError(null)}>Dismiss</Button></div>}
+    {section === 'overview' && <PlanOverview plan={activePlan} busy={busy} onApprove={() => void mutatePlan(() => api.approvePlan(activePlan.id))} onReserve={() => void mutatePlan(() => api.reservePlan(activePlan.id))} onReview={() => setSection(activePlan.status === 'RESERVED' ? 'payments' : 'suppliers')} />}
+    {section === 'suppliers' && <SupplierReview draft={draft} catalogue={catalogue} totalCents={totalCents} busy={busy} aiConfigured={aiConfigured} proposal={proposal} onDraft={setDraft} onSave={() => void saveOrCreate()} onAi={() => void runAi()} />}
+    {section === 'payments' && <div className="space-y-6"><PlanCheckout plan={activePlan} onPlanRefresh={reload} /><RecoveryView plan={activePlan} /></div>}
+    {section === 'alternatives' && <div className="space-y-6"><PlanWhatIf plan={activePlan} onApplied={reload} /><Card><CardHeader><div className="flex items-center gap-3"><RefreshCw className="size-5 text-teal-700" /><div><h2 className="font-bold">Server-validated alternatives</h2><p className="text-sm text-slate-600">These reflect the current plan data; rejected alternatives retain their reason.</p></div></div></CardHeader><CardContent>{activePlan.alternatives.length ? <ul>{activePlan.alternatives.map((alternative) => <AlternativeRow alternative={alternative} key={alternative.id} />)}</ul> : <p className="rounded-lg bg-slate-50 p-4 text-sm text-slate-600">No alternatives are available for this plan yet.</p>}</CardContent></Card></div>}
+    {section === 'activity' && <PlanActivity plan={activePlan} />}
     <p className="flex items-center gap-2 text-xs text-slate-500"><CircleDollarSign className="size-4" />Reservations are simulated inventory holds only. They never create, authorize, or capture a PayPal payment.</p>
   </div>;
 }

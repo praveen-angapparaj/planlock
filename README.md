@@ -20,11 +20,11 @@ This is a local-first hackathon prototype. Supplier inventory is simulated. PayP
 | Capability | Status | Notes |
 | --- | --- | --- |
 | Deterministic plan validation, reservations, alternatives, and scenario faults | Implemented and tested | Catalogue inventory and supplier faults are simulated, local-session demo data. |
-| AI requirement proposal | Implemented; provider module live-checked | Groq and Gemini have separate server-side contracts. The provider returns a proposal only; server validation remains authoritative. |
+| AI requirement proposal and analyst lookup | Implemented and unit-verified | Groq and Gemini have separate server-side contracts. For the analyst, a configured model selects only an allowlisted read-only topic; the server renders all factual answers. |
 | PayPal orders, authorization, capture, void, refund, webhook verification | Implemented; Sandbox E2E needs re-checking | Sandbox-only. A previous local manual Sandbox approval/capture was reported, but this checkout was not re-run against PayPal during Phase 5. |
-| Recovery, reconciliation, idempotency, and restart-safe local runner | Implemented and tested | Recovery runs from persisted SQLite data locally. |
+| Recovery, reconciliation, idempotency, and restart-safe local runner | Implemented and locally tested | Uses PostgreSQL when `DATABASE_URL` is configured; SQLite is an explicit local-demo option. |
 | AG Studio dashboard and Plan analyst | Implemented; browser QA pending | Uses AG Studio, custom widget, linked data sources, and the Studio Agent Framework with a server-side read-only responder. |
-| Render deployment | Intentionally blocked | Render blueprint/workflow code is prepared, but the runtime repositories still use SQLite. Production readiness returns `503` until the PostgreSQL runtime port is complete. |
+| Render deployment | Implemented configuration; externally unverified | The selected topology is one combined Render web service plus PostgreSQL and Workflows. Production requires PostgreSQL and will not fall back to SQLite. |
 
 See [docs/readiness.md](docs/readiness.md) for the evidence and remaining blockers.
 
@@ -34,7 +34,7 @@ See [docs/readiness.md](docs/readiness.md) for the evidence and remaining blocke
 - `server/src/plans/` — deterministic validation, alternatives, AI proposal providers, and simulations.
 - `server/src/plan-payments/` — linked order/payment records, idempotent authorization/capture/void/refund operations, and financial totals.
 - `server/src/recovery/` — persisted cases, approvals, jobs, retries, verified provider events, and the local recovery runner.
-- `server/migrations/` — PostgreSQL target schema and a deliberate SQLite-to-PostgreSQL transfer tool; not yet a production runtime adapter.
+- `server/migrations/` — versioned PostgreSQL schema, advisory-lock migrations, and deliberate SQLite transfer tooling.
 - `render.yaml` — a reviewable future deployment blueprint, not an active deployment.
 
 ## Run locally
@@ -88,7 +88,7 @@ The planner receives only the request and current simulated catalogue. It can pr
 VITE_AG_STUDIO_LICENSE_KEY=your_license_key
 ```
 
-The dashboard is read-only with respect to PlanLock records. Its Plan analyst uses AG Studio’s Agent Framework and calls one ownership-scoped server endpoint. That endpoint has no financial or plan-mutation capability. Check AG Grid’s current license/trial terms before distribution.
+The dashboard is read-only with respect to PlanLock records. Its Plan analyst uses AG Studio’s Agent Framework and calls one ownership-scoped server endpoint. When an AI provider is configured, it may select only an allowlisted lookup topic; the backend renders every factual answer. That endpoint has no financial or plan-mutation capability. Check AG Grid’s current license/trial terms before distribution.
 
 ## Judge demo
 
@@ -113,9 +113,15 @@ The server test suite covers validation, budget and capacity failures, reservati
 
 ## Deployment status
 
-Do **not** deploy the current build as a production API. It still uses synchronous SQLite repositories at runtime; Render services have not been created. The `/api/ready` endpoint intentionally fails in production until a PostgreSQL runtime repository implementation replaces SQLite.
+The selected final submission URL is a **combined Render web service**: Express serves `client/dist` and `/api` from one HTTPS origin, so the signed session cookie and CSRF origin check do not need cross-site configuration. `PORT` is honored. The `planlock-web` static service has been removed from `render.yaml` for this path.
 
-Before deployment: complete that port, run versioned migrations, provision PostgreSQL in the approved Render account, set server secrets and frontend origin, configure HTTPS webhook delivery, and independently test Sandbox recovery. None of those actions are performed by this repository.
+Do **not** deploy the current build yet. PostgreSQL runtime repositories are present, but this checkout has not run the real-database integration suite or deployed the combined service. `vercel.json` remains a frontend-only preview configuration and is **not** a functional PlanLock submission URL because it cannot provide the API, durable sessions, or webhook endpoint.
+
+Before deployment: run the PostgreSQL integration suite against a disposable database, run the versioned migrations against the approved database, configure Render secrets, register the HTTPS Sandbox webhook, deploy the combined service, and independently test Sandbox recovery. None of those external actions are performed by this repository.
+
+## Release build
+
+Run `npm run build` from the repository root. The optimized submission artifacts are `client/dist/` (browser assets) and `server/dist/` (compiled Express API). See [docs/release-verification.md](docs/release-verification.md) for the exact Phase 6 results and known release blockers.
 
 ## Submission requirements and limitations
 

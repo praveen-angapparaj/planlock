@@ -34,8 +34,8 @@ function fixture() {
 }
 
 async function authorizedFixture() {
-  const setup = fixture(); const plan = setup.plans.create(setup.sessionId, input()); setup.plans.approve(setup.sessionId, plan.id); setup.plans.reserve(setup.sessionId, plan.id);
-  const checkout = setup.payments.prepare(setup.sessionId, plan.id);
+  const setup = fixture(); const plan = await setup.plans.create(setup.sessionId, input()); await setup.plans.approve(setup.sessionId, plan.id); await setup.plans.reserve(setup.sessionId, plan.id);
+  const checkout = await setup.payments.prepare(setup.sessionId, plan.id);
   for (const payment of checkout.payments) { await setup.payments.createOrder(setup.sessionId, payment.id); await setup.payments.authorize(setup.sessionId, payment.id); }
   return { ...setup, plan };
 }
@@ -43,33 +43,33 @@ async function authorizedFixture() {
 describe('persistent recovery', () => {
   it('pauses captures and never voids an authorization until a persisted cancellation approval exists', async () => {
     const { plans, payments, recovery, gateway, sessionId, plan } = await authorizedFixture();
-    const broken = plans.applyDemoControl(sessionId, plan.id, 'MARK_UNAVAILABLE');
-    const recoveryCase = recovery.detectSupplierChange(sessionId, plan.id, 'Supplier unavailable.', broken.validationIssues.flatMap((issue) => issue.itemIds));
+    const broken = await plans.applyDemoControl(sessionId, plan.id, 'MARK_UNAVAILABLE');
+    const recoveryCase = await recovery.detectSupplierChange(sessionId, plan.id, 'Supplier unavailable.', broken.validationIssues.flatMap((issue) => issue.itemIds));
     await recovery.process(recoveryCase.id);
-    expect(recovery.summary(sessionId, plan.id).recovery?.state).toBe('AWAITING_CUSTOMER_APPROVAL');
+    expect((await recovery.summary(sessionId, plan.id)).recovery?.state).toBe('AWAITING_CUSTOMER_APPROVAL');
     expect(gateway.voidAuthorization).not.toHaveBeenCalled();
     await expect(payments.confirmBooking(sessionId, plan.id)).rejects.toMatchObject({ code: 'CAPTURES_PAUSED_FOR_RECOVERY' });
   });
 
   it('persists the supplier failure outbox before any browser or worker dispatch', async () => {
     const { plans, recovery, sessionId, plan } = await authorizedFixture();
-    const broken = plans.applyDemoControl(sessionId, plan.id, 'MARK_UNAVAILABLE');
+    const broken = await plans.applyDemoControl(sessionId, plan.id, 'MARK_UNAVAILABLE');
     expect(broken.validationIssues.length).toBeGreaterThan(0);
-    expect(plans.pendingSupplierFailures()).toHaveLength(1);
-    const opened = recovery.drainSupplierFailures();
-    expect(opened).toHaveLength(1); expect(plans.pendingSupplierFailures()).toHaveLength(0);
+    expect(await plans.pendingSupplierFailures()).toHaveLength(1);
+    const opened = await recovery.drainSupplierFailures();
+    expect(opened).toHaveLength(1); expect(await plans.pendingSupplierFailures()).toHaveLength(0);
     await recovery.process(opened[0]!);
-    expect(recovery.summary(sessionId, plan.id).recovery?.state).toBe('AWAITING_CUSTOMER_APPROVAL');
+    expect((await recovery.summary(sessionId, plan.id)).recovery?.state).toBe('AWAITING_CUSTOMER_APPROVAL');
   });
 
   it('survives a worker retry without duplicate voids and records background progress without a browser', async () => {
     const { plans, recovery, gateway, sessionId, plan } = await authorizedFixture();
-    const broken = plans.applyDemoControl(sessionId, plan.id, 'MARK_UNAVAILABLE');
-    const recoveryCase = recovery.detectSupplierChange(sessionId, plan.id, 'Supplier unavailable.', broken.validationIssues.flatMap((issue) => issue.itemIds));
-    await recovery.process(recoveryCase.id); recovery.approveCancellation(sessionId, plan.id);
+    const broken = await plans.applyDemoControl(sessionId, plan.id, 'MARK_UNAVAILABLE');
+    const recoveryCase = await recovery.detectSupplierChange(sessionId, plan.id, 'Supplier unavailable.', broken.validationIssues.flatMap((issue) => issue.itemIds));
+    await recovery.process(recoveryCase.id); await recovery.approveCancellation(sessionId, plan.id);
     await recovery.process(recoveryCase.id); await recovery.process(recoveryCase.id);
     expect(gateway.voidAuthorization).toHaveBeenCalledTimes(3);
-    expect(recovery.summary(sessionId, plan.id).recovery?.state).toBe('RESOLVED');
+    expect((await recovery.summary(sessionId, plan.id)).recovery?.state).toBe('RESOLVED');
   });
 
   it('deduplicates incoming provider events before they can trigger recovery work twice', () => {

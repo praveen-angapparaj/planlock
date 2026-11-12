@@ -40,25 +40,25 @@ function fixture(capture?: (id: string) => Promise<{ id: string; status: string 
 }
 
 async function prepared() {
-  const setup = fixture(); const plan = setup.plans.create(setup.sessionId, input()); setup.plans.approve(setup.sessionId, plan.id); setup.plans.reserve(setup.sessionId, plan.id);
-  const checkout = setup.payments.prepare(setup.sessionId, plan.id);
+  const setup = fixture(); const plan = await setup.plans.create(setup.sessionId, input()); await setup.plans.approve(setup.sessionId, plan.id); await setup.plans.reserve(setup.sessionId, plan.id);
+  const checkout = await setup.payments.prepare(setup.sessionId, plan.id);
   for (const payment of checkout.payments) { await setup.payments.createOrder(setup.sessionId, payment.id); await setup.payments.authorize(setup.sessionId, payment.id); }
   return { ...setup, plan };
 }
 
 describe('PlanPaymentService (mocked PayPal)', () => {
-  it('creates one server-priced payment for every reserved plan item', () => {
-    const { plans, payments, sessionId } = fixture(); const plan = plans.create(sessionId, input()); plans.approve(sessionId, plan.id); plans.reserve(sessionId, plan.id);
-    const checkout = payments.prepare(sessionId, plan.id);
+  it('creates one server-priced payment for every reserved plan item', async () => {
+    const { plans, payments, sessionId } = fixture(); const plan = await plans.create(sessionId, input()); await plans.approve(sessionId, plan.id); await plans.reserve(sessionId, plan.id);
+    const checkout = await payments.prepare(sessionId, plan.id);
     expect(checkout.payments).toHaveLength(3);
     expect(checkout.payments.reduce((total, payment) => total + payment.amountCents, 0)).toBe(54_000);
     expect(checkout.payments.every((payment) => payment.planId === plan.id && payment.planItemId.startsWith('item:') && payment.reservationId.length > 0)).toBe(true);
   });
 
   it('does not let an old plan-payment revision create a financial action', async () => {
-    const { plans, payments, sessionId, gateway } = fixture(); const plan = plans.create(sessionId, input()); plans.approve(sessionId, plan.id); plans.reserve(sessionId, plan.id);
-    const checkout = payments.prepare(sessionId, plan.id);
-    plans.update(sessionId, plan.id, { budgetCents: 59_000 });
+    const { plans, payments, sessionId, gateway } = fixture(); const plan = await plans.create(sessionId, input()); await plans.approve(sessionId, plan.id); await plans.reserve(sessionId, plan.id);
+    const checkout = await payments.prepare(sessionId, plan.id);
+    await plans.update(sessionId, plan.id, { budgetCents: 59_000 });
     await expect(payments.createOrder(sessionId, checkout.payments[0]!.id)).rejects.toMatchObject({ code: 'PLAN_NOT_PAYABLE' });
     expect(gateway.createOrder).not.toHaveBeenCalled();
   });
@@ -71,15 +71,15 @@ describe('PlanPaymentService (mocked PayPal)', () => {
     const gateway = { createOrder: vi.fn(async (_r: string, ref: string) => ({ id: `ORDER-${ref}`, status: 'CREATED' })), authorizeOrder: vi.fn(async () => ({ id: 'ORDER', status: 'COMPLETED', purchase_units: [{ payments: { authorizations: [{ id: `AUTH-${++calls}`, status: 'CREATED' }] } }] })), captureAuthorization: vi.fn(async () => { if (++calls > 4) throw new Error('capture rejected'); return { id: 'CAPTURE-1', status: 'COMPLETED' }; }), voidAuthorization: vi.fn(async () => ({ id: 'AUTH', status: 'VOIDED' })), refundCapture: vi.fn(async () => ({ id: 'REFUND', status: 'COMPLETED' })), getOrder: vi.fn(async () => ({ id: 'ORDER', status: 'COMPLETED', purchase_units: [{ payments: {} }] })) };
     const payments = new PlanPaymentService(plans, paymentStore, gateway);
     cleanup.push(() => { paymentStore.close(); planStore.close(); rmSync(directory, { recursive: true, force: true }); });
-    const plan = plans.create(sessionId, input()); plans.approve(sessionId, plan.id); plans.reserve(sessionId, plan.id); const checkout = payments.prepare(sessionId, plan.id);
+    const plan = await plans.create(sessionId, input()); await plans.approve(sessionId, plan.id); await plans.reserve(sessionId, plan.id); const checkout = await payments.prepare(sessionId, plan.id);
     for (const payment of checkout.payments) { await payments.createOrder(sessionId, payment.id); await payments.authorize(sessionId, payment.id); }
     await expect(payments.confirmBooking(sessionId, plan.id)).rejects.toBeDefined();
-    expect(payments.checkout(sessionId, plan.id).booking.status).toBe('RECOVERY_REQUIRED');
+    expect((await payments.checkout(sessionId, plan.id)).booking.status).toBe('RECOVERY_REQUIRED');
   });
 
   it('only refunds a captured amount and keeps exact cents', async () => {
     const { payments, sessionId, plan } = await prepared(); await payments.confirmBooking(sessionId, plan.id);
-    const captured = payments.checkout(sessionId, plan.id).payments[0]!;
+    const captured = (await payments.checkout(sessionId, plan.id)).payments[0]!;
     const refunded = await payments.refund(sessionId, captured.id, 1_000);
     expect(refunded.status).toBe('PARTIALLY_REFUNDED'); expect(refunded.refundedCents).toBe(1_000);
     await expect(payments.refund(sessionId, captured.id, captured.amountCents)).rejects.toMatchObject({ code: 'REFUND_AMOUNT_INVALID' });
@@ -87,23 +87,73 @@ describe('PlanPaymentService (mocked PayPal)', () => {
 
   it('keeps a submitted refund pending until PayPal confirms it', async () => {
     const { plans, payments, gateway, sessionId } = fixture(undefined, 'PENDING');
-    const plan = plans.create(sessionId, input()); plans.approve(sessionId, plan.id); plans.reserve(sessionId, plan.id);
-    const checkout = payments.prepare(sessionId, plan.id);
+    const plan = await plans.create(sessionId, input()); await plans.approve(sessionId, plan.id); await plans.reserve(sessionId, plan.id);
+    const checkout = await payments.prepare(sessionId, plan.id);
     for (const payment of checkout.payments) { await payments.createOrder(sessionId, payment.id); await payments.authorize(sessionId, payment.id); }
     await payments.confirmBooking(sessionId, plan.id);
-    const captured = payments.checkout(sessionId, plan.id).payments[0]!;
+    const captured = (await payments.checkout(sessionId, plan.id)).payments[0]!;
     const pending = await payments.refund(sessionId, captured.id, 1_000);
     expect(pending.status).toBe('REFUND_PENDING'); expect(pending.refundedCents).toBe(0); expect(pending.pendingRefundCents).toBe(1_000);
-    expect(payments.checkout(sessionId, plan.id).financialSummary).toMatchObject({ refundedCents: 0, pendingRefundCents: 1_000 });
+    expect((await payments.checkout(sessionId, plan.id)).financialSummary).toMatchObject({ refundedCents: 0, pendingRefundCents: 1_000 });
     gateway.getRefund.mockResolvedValue({ id: 'REFUND-1', status: 'COMPLETED' });
     const settled = await payments.reconcile(sessionId, captured.id);
     expect(settled.status).toBe('PARTIALLY_REFUNDED'); expect(settled.refundedCents).toBe(1_000); expect(settled.pendingRefundCents).toBe(0);
   });
 
-  it('runs simulations without changing the saved plan or reservations', () => {
-    const { plans, sessionId } = fixture(); const plan = plans.create(sessionId, input()); const before = JSON.stringify(plan);
-    const simulation = simulatePlan(plan, plans.catalogue(), 'ELECTRICITY_REMOVED');
+  it('allows cancellation, safe retry, and repeated approval without deadlocking or reusing stale orders', async () => {
+    const { plans, payments, gateway, sessionId } = fixture();
+    const plan = await plans.create(sessionId, input());
+    await plans.approve(sessionId, plan.id);
+    await plans.reserve(sessionId, plan.id);
+    const checkout = await payments.prepare(sessionId, plan.id);
+    const target = checkout.payments[0]!;
+
+    // 1. Initial order creation
+    const withOrder = await payments.createOrder(sessionId, target.id);
+    expect(withOrder.paypalOrderId).toBeDefined();
+    const firstOrderId = withOrder.paypalOrderId;
+
+    // 2. Buyer cancels the PayPal popup
+    const cancelled = await payments.cancelBeforeApproval(sessionId, target.id);
+    expect(cancelled.status).toBe('CANCELLED');
+    expect(cancelled.paypalOrderId).toBeNull();
+
+    // 3. Trying to authorize a cancelled payment throws
+    await expect(payments.authorize(sessionId, target.id)).rejects.toMatchObject({ code: 'INVALID_PAYMENT_STATE' });
+
+    // 4. Retry resets payment to AWAITING_APPROVAL with no stale order
+    const retried = await payments.retry(sessionId, target.id);
+    expect(retried.status).toBe('AWAITING_APPROVAL');
+    expect(retried.paypalOrderId).toBeNull();
+
+    // 5. Creating a new order uses a fresh idempotency key and assigns a new order ID
+    gateway.createOrder.mockResolvedValueOnce({ id: 'ORDER-NEW-ATTEMPT', status: 'CREATED' });
+    const freshOrder = await payments.createOrder(sessionId, target.id);
+    expect(freshOrder.paypalOrderId).toBe('ORDER-NEW-ATTEMPT');
+    expect(freshOrder.paypalOrderId).not.toBe(firstOrderId);
+
+    // 6. Complete authorization for all items
+    await payments.authorize(sessionId, target.id);
+    for (const other of checkout.payments.slice(1)) {
+      await payments.createOrder(sessionId, other.id);
+      await payments.authorize(sessionId, other.id);
+    }
+
+    // 7. Booking confirms successfully with zero duplicate captures
+    const confirmed = await payments.confirmBooking(sessionId, plan.id);
+    expect(confirmed.booking.status).toBe('CONFIRMED');
+    expect(gateway.captureAuthorization).toHaveBeenCalledTimes(3);
+
+    // 8. Repeated confirmBooking call is idempotent and does not call gateway again
+    const repeated = await payments.confirmBooking(sessionId, plan.id);
+    expect(repeated.booking.status).toBe('CONFIRMED');
+    expect(gateway.captureAuthorization).toHaveBeenCalledTimes(3);
+  });
+
+  it('runs simulations without changing the saved plan or reservations', async () => {
+    const { plans, sessionId } = fixture(); const plan = await plans.create(sessionId, input()); const before = JSON.stringify(plan);
+    const simulation = simulatePlan(plan, await plans.catalogue(), 'ELECTRICITY_REMOVED');
     expect(simulation.sideEffectFree).toBe(true); expect(simulation.issues.map((issue) => issue.ruleCode)).toContain('ELECTRICITY_DEPENDENCY_UNMET');
-    expect(JSON.stringify(plans.get(sessionId, plan.id))).toBe(before);
+    expect(JSON.stringify(await plans.get(sessionId, plan.id))).toBe(before);
   });
 });

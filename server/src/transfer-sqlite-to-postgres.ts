@@ -4,6 +4,7 @@ import pg from 'pg';
 import { DatabaseSync } from './sqlite.js';
 
 const sourceArgument = process.argv.find((value) => value.startsWith('--sqlite='))?.slice('--sqlite='.length);
+const validateOnly = process.argv.includes('--validate-only');
 const databaseUrl = process.env.DATABASE_URL;
 if (!sourceArgument) throw new Error('Pass --sqlite=PATH_TO_PLANLOCK_SQLITE. The script never selects a source database implicitly.');
 if (!databaseUrl) throw new Error('DATABASE_URL is required for a PostgreSQL transfer.');
@@ -46,6 +47,12 @@ try {
     if (!columns.length) continue;
     const rows = source.prepare(`SELECT * FROM ${quote(table)}`).all() as Array<Record<string, unknown>>;
     if (!rows.length) continue;
+    if (validateOnly) {
+      const targetCount = await target.query(`SELECT COUNT(*)::integer AS count FROM ${quote(table)}`);
+      if (Number(targetCount.rows[0]?.count ?? 0) < rows.length) throw new Error(`Validation failed for ${table}: PostgreSQL has fewer rows than the SQLite source.`);
+      console.info(JSON.stringify({ event: 'sqlite_transfer_validation', table, sourceRows: rows.length, targetRows: Number(targetCount.rows[0]?.count ?? 0) }));
+      continue;
+    }
     const names = columns.map(quote).join(', ');
     const placeholders = columns.map((_, index) => `$${index + 1}`).join(', ');
     const statement = `INSERT INTO ${quote(table)} (${names}) VALUES (${placeholders}) ON CONFLICT DO NOTHING`;
@@ -58,7 +65,9 @@ try {
       }
       await target.query('COMMIT');
     } catch (error) { await target.query('ROLLBACK'); throw error; }
-    console.info(JSON.stringify({ event: 'sqlite_transfer_table', table, sourceRows: rows.length, insertedRows: copied }));
+    const targetCount = await target.query(`SELECT COUNT(*)::integer AS count FROM ${quote(table)}`);
+    if (Number(targetCount.rows[0]?.count ?? 0) < rows.length) throw new Error(`Transfer validation failed for ${table}: PostgreSQL has fewer rows than the SQLite source.`);
+    console.info(JSON.stringify({ event: 'sqlite_transfer_table', table, sourceRows: rows.length, insertedRows: copied, targetRows: Number(targetCount.rows[0]?.count ?? 0) }));
   }
 } finally {
   source.close();

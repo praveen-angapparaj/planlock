@@ -8,6 +8,8 @@ import type {
   PlanRequirement, PlanStatus, ReservationRecord, ReservationState, SupplierOffering, UpdatePlanInput, ValidationIssue
 } from './types.js';
 import { DatabaseSync, type SQLiteDatabase } from '../sqlite.js';
+import { config } from '../config.js';
+import { PostgresPlanRepository } from './postgres-repository.js';
 
 const DEFAULT_DATABASE_PATH = fileURLToPath(new URL('../../../data/planlock.sqlite', import.meta.url));
 const now = () => new Date().toISOString();
@@ -217,10 +219,12 @@ export class PlanRepository {
     return this.getRequiredForSession(id, sessionId);
   }
 
-  approvePlan(id: string, sessionId: string): PlanDetail {
+  approvePlan(id: string, sessionId: string, expectedVersion?: number): PlanDetail {
     const plan = this.getRequiredForSession(id, sessionId);
     if (plan.validationIssues.length) throw new ReservationValidationError(plan.validationIssues);
-    this.db.prepare(`UPDATE plans SET approval_state = 'APPROVED', updated_at = ? WHERE id = ? AND session_id = ?`).run(now(), id, sessionId);
+    if (expectedVersion !== undefined && plan.version !== expectedVersion) throw new Error('PLAN_REVISION_CHANGED');
+    const result = this.db.prepare(`UPDATE plans SET approval_state = 'APPROVED', updated_at = ? WHERE id = ? AND session_id = ? AND version = ? AND approval_state = 'PENDING_REVIEW'`).run(now(), id, sessionId, expectedVersion ?? plan.version);
+    if (result.changes !== 1) throw new Error('PLAN_REVISION_CHANGED');
     this.addEvent(id, 'PLAN_APPROVED', 'Customer confirmed the current requirements, dependencies, and selections.', plan.items.map((item) => item.id));
     return this.getRequiredForSession(id, sessionId);
   }
@@ -386,4 +390,5 @@ export class PlanRepository {
   }
 }
 
-export const planRepository = new PlanRepository();
+export type PlanStore = PlanRepository | PostgresPlanRepository;
+export const planRepository: PlanStore = config.databaseUrl ? new PostgresPlanRepository() : new PlanRepository();

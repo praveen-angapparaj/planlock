@@ -1,56 +1,49 @@
 # Sponsor integration record
 
-This record is intentionally factual. It distinguishes installed/source integrations from deployed or live-verified sponsor use.
+Updated 1 November 2026. This record distinguishes source integration, local verification, and hosted or live-provider evidence.
 
 ## AG Grid / AG Studio
 
-### What is actually used
+### Used in the application
 
-PlanLock embeds the real `ag-studio-react` / `ag-studio` packages in [AgStudioDashboard.tsx](../client/src/components/AgStudioDashboard.tsx). The dashboard receives session-scoped, read-only data for:
+`client/src/components/AgStudioDashboard.tsx` embeds `ag-studio-react` and `ag-studio` with session-scoped, read-only sources for plan items, dependency impacts, alternatives, linked payments, recovery actions, and server-calculated financial totals. It declares relationships among item, dependency, payment, and recovery IDs.
 
-- selected plan items, suppliers, services, prices, availability, electricity requirements, and reservation state;
-- dependency-impact edges;
-- server-validated alternatives, including rejected reason text;
-- linked plan-payment and recovery-action records;
-- planned, authorized-but-uncaptured, captured, pending-refund, and completed-refund totals.
+`RecoveryProgressWidget.tsx` is a registered custom Studio widget. The dashboard includes a default report layout, a reset-layout control, and the Studio Agent Framework via `createAiHarness` and `clientToolRunner`.
 
-`RecoveryProgressWidget.tsx` is registered using `createWidgets`. The report declares relationships from dependency impacts to plan items, plan payments to plan items, and recovery actions to payments. It has a non-empty default layout and a Reset dashboard layout control.
+The Plan analyst has exactly one server-side, ownership-scoped read-only capability. It cannot reserve, approve, capture, void, refund, or mutate a plan. If Gemini or Groq is configured, the model selects only an allowlisted topic; the backend renders factual plan data and labels the result **AI-assisted lookup**. Without a provider, it labels a deterministic fallback.
 
-The dashboard also uses the documented Studio Agent Framework through `createAiHarness` and `clientToolRunner`. The **Plan analyst** calls one signed local-session-scoped, server-side read-only endpoint. It exposes no tool for reservation, approval, capture, void, refund, or plan mutation. Its present answers are deterministic summaries grounded in persisted backend results, not a browser-side model adapter or a claim of an LLM dashboard agent.
+### Evidence and remaining work
 
-### Reviewer verification
-
-1. Create a scenario and open **Plan intelligence** in Plan Workspace.
-2. Inspect the initial widgets, linked data sources, filters, and Reset dashboard layout.
-3. Open the Studio assistant and use a starter prompt such as “What breaks if this supplier fails?” or “Show alternatives within my budget.”
-4. Confirm the answer describes only the current plan and that no financial controls appear in the assistant.
-
-### Status and license boundary
-
-Client type-check/build verification has passed; visual browser QA remains manual. `VITE_AG_STUDIO_LICENSE_KEY` is optional and public-to-the-browser by design, but must remain in `.env`, not the repository. The [AG Grid sponsor guidance](https://paypalaihackathon.devpost.com/details/aggrid) offers a 45-day trial and asks for polished Studio work, custom widgets/layout, and Agent Framework usage. Verify current commercial/trial terms directly with AG Grid before publishing a build or making any license claim.
+Client type-checking and optimized build passed on 1 November 2026. Browser interaction, narrow-screen usability, linked-row behavior, and Agent Framework visual QA have not been observed in this workspace.
 
 ## APIMatic
 
-### What is actually used
+### Installed development integration
 
-Nothing. PlanLock has no APIMatic Context Plugin record, generated SDK, portal, or project configuration. The PayPal client is handwritten in `client/src/api.ts`, and server payment calls use the project’s own REST gateway code.
+On 1 November 2026, the official APIMatic PayPal Context Plugin was installed into Codex with:
 
-### Submission implication
+```powershell
+npx context-plugins install paypal --targets codex
+```
 
-Do not claim APIMatic use or eligibility for the APIMatic sponsor prize. The [APIMatic sponsor page](https://paypalaihackathon.devpost.com/details/apimatic) describes the optional PayPal Context Plugin, but that is not evidence of use in this repository.
+The installer reported `paypal@context-plugins` installed for Codex. The plugin has no runtime dependency and no source file was added merely to show a sponsor name.
+
+### Activation boundary
+
+The PayPal TypeScript integration and lookup guidance was loaded in this session and used to review `server/src/paypal.ts`. It confirmed the Sandbox/OAuth2 configuration model and reinforced the existing durable intent/claim/reconciliation handling. The generated `paypal` SDK package/map was not installed (`MODULE_NOT_FOUND`), so this remains a plugin-assisted review of the manual REST client, **not** a claim of APIMatic SDK integration or verified provider operations.
+
+Official setup: [APIMatic Context Plugins](https://www.apimatic.io/product/context-plugins) and the [PayPal hackathon APIMatic page](https://paypalaihackathon.devpost.com/details/apimatic).
 
 ## Render
 
-### What is actually used
+`render.yaml` defines the intended final topology: one Node web service serving `client/dist` and `/api` from the same Render origin, one Render PostgreSQL database, one workflow service, and one cron dispatcher. The Node service honors Render's `PORT`; the separate static web service has been removed.
 
-`render.yaml` defines a future API/static-site/PostgreSQL/workflow/cron topology. `server/src/workflows/index.ts` uses `@renderinc/sdk` task registration, and `server/src/cron-dispatch.ts` starts the reconciliation task. The local development runner in `server/src/recovery/local-runner.ts` is deliberately separate and must not be called a Render Workflow.
+`server/src/workflows/index.ts` registers `processRecovery` and `reconcileDueWork` with `@renderinc/sdk`. Recovery work is still persisted and claimed locally before dispatch, and local timers are not described as Render Workflows.
 
-### Reviewer verification and blocker
+No Render resource, task run, database, or public URL has been created. Runtime repositories select PostgreSQL when `DATABASE_URL` is configured and production refuses SQLite fallback. Do not claim Render deployment or prize eligibility until hosted task execution and real-database verification are observed.
 
-No Render service, database, workflow, cron, API key, or public URL has been created. The current runtime repositories remain SQLite-backed; `/api/ready` deliberately returns `503` in production. PostgreSQL migrations and a transfer tool are preparation only, not a runtime PostgreSQL adapter.
+## PayPal
 
-Consequently, do not claim a deployed Render demo or Render-prize eligibility yet. Complete the PostgreSQL runtime port, obtain deployment authorization, deploy, configure the public frontend/API/webhook origins, and verify worker execution before updating this record. The [official rules](https://paypalaihackathon.devpost.com/rules) state that sponsor-prize submissions must use the applicable sponsor tool.
+PlanLock uses Sandbox-only orders, authorization, capture, void, refund, provider lookup, webhook-signature verification, and persisted reconciliation paths. It is a single-seller demonstration when a seller ID is configured. Supplier inventory is simulated and is visibly labelled as such.
 
-## PayPal core integration
-
-PayPal is the required hackathon platform rather than a selected sponsor entry in this record. The project uses Sandbox-only orders, authorization, capture, void/refund, provider lookup, webhook signature verification, and persisted event reconciliation paths. It is not configured for live payments, seller onboarding, marketplace routing, or production settlement. Fresh Sandbox/webhook verification remains a prerequisite before public demonstration claims.
+No fresh Phase 6 live Sandbox approval, capture, void, refund, signed webhook, or ambiguous-response reconciliation was run. Do not present mocked tests or a browser return as provider evidence.

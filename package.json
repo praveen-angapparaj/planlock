@@ -2,17 +2,26 @@
   "name": "planlock-phase-1",
   "version": "0.1.0",
   "private": true,
-  "workspaces": ["client", "server"],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "workspaces": [
+    "client",
+    "server"
+  ],
   "scripts": {
     "dev": "concurrently -n server,client -c cyan,magenta \"npm run dev --workspace server\" \"npm run dev --workspace client\"",
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspace server",
+    "test:postgres": "npm run test:postgres --workspace server",
     "test:watch": "npm run test:watch --workspace server",
     "seed:catalogue": "npm run seed:catalogue --workspace server",
     "reset:demo": "npm run reset:demo --workspace server"
   },
   "devDependencies": {
-    "concurrently": "^9.1.2"
+    "@playwright/test": "^1.65.0",
+    "concurrently": "^9.1.2",
+    "playwright": "^1.65.0"
   }
 }

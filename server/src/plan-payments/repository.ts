@@ -3,6 +3,8 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync, type SQLiteDatabase } from '../sqlite.js';
+import { config } from '../config.js';
+import { PostgresPlanPaymentRepository } from './postgres-repository.js';
 import type { BookingRecord, BookingStatus, FinancialSummary, PlanCheckout, PlanPayment, PlanPaymentEvent, PlanPaymentStatus } from './types.js';
 
 const DEFAULT_DATABASE_PATH = fileURLToPath(new URL('../../../data/planlock.sqlite', import.meta.url));
@@ -118,7 +120,8 @@ export class PlanPaymentRepository {
   setAuthorized(id: string, authorizationId: string): void { this.update(id, { paypal_authorization_id: authorizationId, status: 'AUTHORIZED', reconciliation_required: 0, last_error: null, financial_operation: null, financial_lock_at: null }); this.addEvent(id, 'PAYMENT_AUTHORIZED', 'PayPal confirmed an authorization; funds remain uncaptured.'); }
   setCaptured(id: string, captureId: string | null): void { this.update(id, { paypal_capture_id: captureId, status: 'CAPTURED', reconciliation_required: 0, last_error: null, financial_operation: null, financial_lock_at: null }); this.addEvent(id, 'PAYMENT_CAPTURED', 'PayPal confirmed capture for this plan item.'); }
   setVoided(id: string): void { this.update(id, { status: 'VOIDED', reconciliation_required: 0, last_error: null, financial_operation: null, financial_lock_at: null }); this.addEvent(id, 'PAYMENT_VOIDED', 'Unused PayPal authorization was voided.'); }
-  setCancelled(id: string): void { this.update(id, { status: 'CANCELLED', last_error: null }); this.addEvent(id, 'PAYMENT_CANCELLED', 'Buyer cancelled before authorization.'); }
+  setCancelled(id: string): void { this.update(id, { status: 'CANCELLED', paypal_order_id: null, last_error: null }); this.addEvent(id, 'PAYMENT_CANCELLED', 'Buyer cancelled before authorization.'); }
+  resetToAwaitingApproval(id: string): void { this.update(id, { status: 'AWAITING_APPROVAL', paypal_order_id: null, last_error: null }); this.addEvent(id, 'PAYMENT_RETRY_PREPARED', 'Payment reset for a new approval attempt.'); }
   markUncertain(id: string, message: string): void { this.update(id, { reconciliation_required: 1, last_error: message, financial_operation: null, financial_lock_at: null }); this.addEvent(id, 'RECONCILIATION_REQUIRED', message); }
   markRefundPending(id: string, amountCents: number, refundId: string | null = null): void {
     this.update(id, { status: 'REFUND_PENDING', paypal_refund_id: refundId, pending_refund_cents: amountCents, last_error: null, financial_operation: null, financial_lock_at: null });
@@ -197,10 +200,11 @@ export class PlanPaymentRepository {
   }
 }
 
-let defaultRepository: PlanPaymentRepository | undefined;
+let defaultRepository: PlanPaymentRepository | PostgresPlanPaymentRepository | undefined;
+export type PlanPaymentStore = PlanPaymentRepository | PostgresPlanPaymentRepository;
 
 /** Lazily open the shared database after the planning schema has finished initialising. */
-export function getPlanPaymentRepository(): PlanPaymentRepository {
-  defaultRepository ??= new PlanPaymentRepository();
+export function getPlanPaymentRepository(): PlanPaymentStore {
+  defaultRepository ??= config.databaseUrl ? new PostgresPlanPaymentRepository() : new PlanPaymentRepository();
   return defaultRepository;
 }

@@ -31,58 +31,58 @@ function input(selectedOfferingIds: string[], overrides: Partial<CreatePlanInput
 }
 
 describe('PlanService deterministic validation and reservations', () => {
-  it('accepts the $540 reference plan and preserves cents', () => {
+  it('accepts the $540 reference plan and preserves cents', async () => {
     const { service, sessionId } = fixture();
-    const plan = service.create(sessionId, input(['riverside-stall', 'refrigerated-display', 'morning-delivery']));
+    const plan = await service.create(sessionId, input(['riverside-stall', 'refrigerated-display', 'morning-delivery']));
     expect(plan.validationIssues).toEqual([]);
     expect(plan.items.reduce((total, item) => total + item.offering.priceCents, 0)).toBe(54_000);
   });
 
-  it('rejects the cheaper Garden stall because refrigeration has no electricity source', () => {
+  it('rejects the cheaper Garden stall because refrigeration has no electricity source', async () => {
     const { service, sessionId } = fixture();
-    const plan = service.create(sessionId, input(['garden-stall', 'refrigerated-display', 'morning-delivery']));
+    const plan = await service.create(sessionId, input(['garden-stall', 'refrigerated-display', 'morning-delivery']));
     expect(plan.validationIssues.map((issue) => issue.ruleCode)).toContain('ELECTRICITY_DEPENDENCY_UNMET');
   });
 
-  it('rejects late delivery and the $625 premium replacement', () => {
+  it('rejects late delivery and the $625 premium replacement', async () => {
     const { service, sessionId } = fixture();
-    const late = service.create(sessionId, input(['riverside-stall', 'refrigerated-display', 'late-delivery']));
+    const late = await service.create(sessionId, input(['riverside-stall', 'refrigerated-display', 'late-delivery']));
     expect(late.validationIssues.map((issue) => issue.ruleCode)).toContain('DELIVERY_DEADLINE_MISSED');
-    const expensive = service.create(sessionId, input(['premium-stall', 'refrigerated-display', 'morning-delivery']));
+    const expensive = await service.create(sessionId, input(['premium-stall', 'refrigerated-display', 'morning-delivery']));
     expect(expensive.validationIssues.map((issue) => issue.ruleCode)).toContain('BUDGET_EXCEEDED');
   });
 
-  it('keeps the $560 simulated backup proposal separate from the $625 rejected replacement', () => {
+  it('keeps the $560 simulated backup proposal separate from the $625 rejected replacement', async () => {
     const { service, sessionId } = fixture();
-    const proposal = service.create(sessionId, demoScenarioInput('RECOVERY_PROPOSAL'));
+    const proposal = await service.create(sessionId, demoScenarioInput('RECOVERY_PROPOSAL'));
     expect(proposal.items.reduce((total, item) => total + item.offering.priceCents, 0)).toBe(56_000);
     expect(proposal.items.find((item) => item.offeringId === 'backup-electric-stall')?.offering.name).toContain('Simulated');
-    const expensive = service.create(sessionId, input(['premium-stall', 'refrigerated-display', 'morning-delivery']));
+    const expensive = await service.create(sessionId, input(['premium-stall', 'refrigerated-display', 'morning-delivery']));
     expect(expensive.items.reduce((total, item) => total + item.offering.priceCents, 0)).toBe(62_500);
     expect(expensive.validationIssues.map((issue) => issue.ruleCode)).toContain('BUDGET_EXCEEDED');
   });
 
-  it('does not overbook capacity when plans reserve sequentially', () => {
+  it('does not overbook capacity when plans reserve sequentially', async () => {
     const { service, sessionId } = fixture();
-    const first = service.create(sessionId, input(['riverside-stall', 'refrigerated-display', 'morning-delivery']));
-    const second = service.create(sessionId, input(['riverside-stall', 'refrigerated-display', 'morning-delivery']));
-    service.approve(sessionId, first.id);
-    service.approve(sessionId, second.id);
-    service.reserve(sessionId, first.id);
-    service.reserve(sessionId, second.id);
-    const third = service.create(sessionId, input(['riverside-stall', 'refrigerated-display', 'morning-delivery']));
+    const first = await service.create(sessionId, input(['riverside-stall', 'refrigerated-display', 'morning-delivery']));
+    const second = await service.create(sessionId, input(['riverside-stall', 'refrigerated-display', 'morning-delivery']));
+    await service.approve(sessionId, first.id);
+    await service.approve(sessionId, second.id);
+    await service.reserve(sessionId, first.id);
+    await service.reserve(sessionId, second.id);
+    const third = await service.create(sessionId, input(['riverside-stall', 'refrigerated-display', 'morning-delivery']));
     expect(third.validationIssues.map((issue) => issue.ruleCode)).toContain('CAPACITY_INSUFFICIENT');
   });
 
-  it('expires reservations and invalidates supplier changes', () => {
+  it('expires reservations and invalidates supplier changes', async () => {
     const { service, sessionId } = fixture();
-    const plan = service.create(sessionId, input(['riverside-stall', 'refrigerated-display', 'morning-delivery']));
-    service.approve(sessionId, plan.id);
-    service.reserve(sessionId, plan.id);
-    const expired = service.applyDemoControl(sessionId, plan.id, 'EXPIRE_RESERVATIONS');
+    const plan = await service.create(sessionId, input(['riverside-stall', 'refrigerated-display', 'morning-delivery']));
+    await service.approve(sessionId, plan.id);
+    await service.reserve(sessionId, plan.id);
+    const expired = await service.applyDemoControl(sessionId, plan.id, 'EXPIRE_RESERVATIONS');
     expect(expired.status).toBe('EXPIRED');
-    const changed = service.create(sessionId, input(['riverside-stall', 'refrigerated-display', 'morning-delivery']));
-    const invalidated = service.applyDemoControl(sessionId, changed.id, 'REMOVE_ELECTRICITY');
+    const changed = await service.create(sessionId, input(['riverside-stall', 'refrigerated-display', 'morning-delivery']));
+    const invalidated = await service.applyDemoControl(sessionId, changed.id, 'REMOVE_ELECTRICITY');
     expect(invalidated.validationIssues.map((issue) => issue.ruleCode)).toContain('ELECTRICITY_DEPENDENCY_UNMET');
   });
 
@@ -136,5 +136,25 @@ describe('PlanService deterministic validation and reservations', () => {
     expect(fetchMock).toHaveBeenCalledWith('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent', expect.objectContaining({
       headers: { 'Content-Type': 'application/json', 'x-goog-api-key': 'test-key' }
     }));
+  });
+
+  it('uses the model only to select an allowlisted read-only analyst topic', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({
+      choices: [{ message: { content: JSON.stringify({ topic: 'FINANCIALS' }) } }]
+    }) });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(new GroqPlanner('test-key', 'llama-3.3-70b-versatile').classifyReadOnlyQuestion('Can you capture the payment?')).resolves.toBe('FINANCIALS');
+    const request = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string);
+    expect(request.messages[0].content).toContain('Do not answer the question or suggest an action.');
+
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({ topic: 'CAPTURE_PAYMENT' }) } }] }) });
+    await expect(new GroqPlanner('test-key', 'llama-3.3-70b-versatile').classifyReadOnlyQuestion('Capture it now.')).rejects.toMatchObject({ code: 'AI_RESPONSE_INVALID' });
+  });
+
+  it('does not expose one session’s plan through another session id', async () => {
+    const { service, sessionId } = fixture();
+    const plan = await service.create(sessionId, input(['riverside-stall', 'refrigerated-display', 'morning-delivery']));
+    await expect(service.get('d461f0b4-1186-45d6-bd8d-6686a084fcef', plan.id)).rejects.toThrow(/not found/i);
   });
 });

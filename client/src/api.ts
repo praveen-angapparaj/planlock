@@ -54,9 +54,25 @@ export interface RecoveryAction { id: string; paymentId: string; type: 'VOID_AUT
 export interface RecoveryApproval { id: string; planVersion: number; scope: 'CANCELLATION'; actions: RecoveryAction['type'][]; transactionIds: string[]; amountLimitCents: number | null; approvedAt: string; expiresAt: string | null; invalidatedAt: string | null }
 export interface RecoveryCase { id: string; planId: string; planVersion: number; state: RecoveryState; reason: string; dependencyItemIds: string[]; pauseCaptures: boolean; originalPlan: { version: number; selectedOfferingIds: string[] }; proposedPlan: { version: number; selectedOfferingIds: string[] } | null; createdAt: string; updatedAt: string; approvals: RecoveryApproval[]; actions: RecoveryAction[] }
 export interface RecoverySummary { recovery: RecoveryCase | null; financial: { authorizedCents: number; capturedCents: number; refundPendingCents: number; refundedCents: number; unresolvedCents: number } }
+export interface PlanAnalystAnswer { answer: string; topic: 'DEPENDENCIES' | 'ALTERNATIVES' | 'APPROVALS' | 'FINANCIALS' | 'STATUS'; mode: 'AI_ASSISTED_LOOKUP' | 'DETERMINISTIC_FALLBACK' }
 export interface SimulationResult { planId: string; planVersion: number; scenario: 'SUPPLIER_UNAVAILABLE' | 'ELECTRICITY_REMOVED' | 'DELIVERY_DELAYED'; title: string; issues: ValidationIssue[]; alternatives: AlternativePlan[]; financialConsequences: { currentPlannedCents: number; lowestValidAlternativeCents: number | null; knownFuturePurchaseDeltaCents: number | null; refundEstimateCents: null; unknownConsequences: string[] }; sideEffectFree: true }
 
+let sessionPrimed: Promise<void> | null = null;
+
+export function ensureSession(): Promise<void> {
+  if (!sessionPrimed) {
+    const baseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? '';
+    sessionPrimed = fetch(`${baseUrl}/api/config`, { credentials: 'include' })
+      .then(() => undefined)
+      .catch(() => undefined);
+  }
+  return sessionPrimed;
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  if (path !== '/api/config' && path !== '/api/health' && path !== '/api/ready') {
+    await ensureSession();
+  }
   const baseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? '';
   const response = await fetch(`${baseUrl}${path}`, { credentials: 'include', headers: { 'Content-Type': 'application/json' }, ...options });
   const body = await response.json().catch(() => null) as { error?: { message?: string } } | T | null;
@@ -89,12 +105,13 @@ export const api = {
   createPlanPaymentOrder: (id: string) => request<{ payment: PlanPayment }>(`/api/plan-payments/${id}/order`, { method: 'POST' }),
   authorizePlanPayment: (id: string) => request<{ payment: PlanPayment }>(`/api/plan-payments/${id}/authorize`, { method: 'POST' }),
   cancelPlanPayment: (id: string) => request<{ payment: PlanPayment }>(`/api/plan-payments/${id}/cancel`, { method: 'POST' }),
+  retryPlanPayment: (id: string) => request<{ payment: PlanPayment }>(`/api/plan-payments/${id}/retry`, { method: 'POST' }),
   voidPlanPayment: (id: string) => request<{ payment: PlanPayment }>(`/api/plan-payments/${id}/void`, { method: 'POST' }),
   reconcilePlanPayment: (id: string) => request<{ payment: PlanPayment }>(`/api/plan-payments/${id}/reconcile`, { method: 'POST' }),
   refundPlanPayment: (id: string, amountCents: number) => request<{ payment: PlanPayment }>(`/api/plan-payments/${id}/refund`, { method: 'POST', body: JSON.stringify({ amountCents }) }),
   confirmBooking: (id: string) => request<{ checkout: PlanCheckout }>(`/api/plans/${id}/checkout/confirm`, { method: 'POST' }),
   recovery: (id: string) => request<RecoverySummary>(`/api/plans/${id}/recovery`),
   approveCancellationRecovery: (id: string) => request<{ approval: RecoveryApproval }>(`/api/plans/${id}/recovery/approve-cancellation`, { method: 'POST' }),
-  planAssistantQuestion: (id: string, question: string) => request<{ answer: string }>(`/api/plans/${id}/assistant/read-only`, { method: 'POST', body: JSON.stringify({ question }) }),
+  planAssistantQuestion: (id: string, question: string) => request<PlanAnalystAnswer>(`/api/plans/${id}/assistant/read-only`, { method: 'POST', body: JSON.stringify({ question }) }),
   recoveryQuestion: (id: string, question: 'WHAT_HAPPENED' | 'PENDING_REFUNDS' | 'NEEDS_APPROVAL' | 'WHY_NOT_RESOLVED') => request<{ answer: string; recovery: RecoverySummary }>(`/api/plans/${id}/recovery/questions`, { method: 'POST', body: JSON.stringify({ question }) })
 };

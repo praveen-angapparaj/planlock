@@ -3,6 +3,8 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync, type SQLiteDatabase } from '../sqlite.js';
+import { config } from '../config.js';
+import { PostgresRecoveryRepository } from './postgres-repository.js';
 import type { RecoveryAction, RecoveryActionStatus, RecoveryActionType, RecoveryApproval, RecoveryCase, RecoveryState } from './types.js';
 
 const DEFAULT_DATABASE_PATH = fileURLToPath(new URL('../../../data/planlock.sqlite', import.meta.url));
@@ -168,5 +170,6 @@ export class RecoveryRepository {
     actions: (this.db.prepare('SELECT * FROM recovery_actions WHERE recovery_case_id = ? ORDER BY created_at').all(id) as Row[]).map(mapAction)
   }; }
 }
-let defaultRepository: RecoveryRepository | undefined;
-export function getRecoveryRepository(): RecoveryRepository { defaultRepository ??= new RecoveryRepository(); return defaultRepository; }
+let defaultRepository: RecoveryRepository | PostgresRecoveryRepository | undefined;
+export type RecoveryStore = RecoveryRepository | PostgresRecoveryRepository;
+export function getRecoveryRepository(): RecoveryStore { defaultRepository ??= config.databaseUrl ? new PostgresRecoveryRepository() : new RecoveryRepository(); return defaultRepository; }

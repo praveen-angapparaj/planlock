@@ -2,7 +2,7 @@ import { AppError } from '../errors.js';
 import { enumerateAlternatives } from './alternatives.js';
 import type { PlannerProvider } from './ai.js';
 import { DisabledPlanner } from './ai.js';
-import { PlanRepository, ReservationValidationError, type SupplierFailureOutboxRecord } from './repository.js';
+import { ReservationValidationError, type PlanStore, type SupplierFailureOutboxRecord } from './repository.js';
 import { simulatePlan } from './simulation.js';
 import type { CreatePlanInput, PlanDetail, UpdatePlanInput, ValidationIssue } from './types.js';
 import { buildItems, defaultDependencies, validatePlan } from './validation.js';
@@ -18,42 +18,46 @@ function asCreateInput(plan: PlanDetail): CreatePlanInput {
 }
 
 export class PlanService {
-  constructor(private readonly store: PlanRepository, private readonly planner: PlannerProvider = new DisabledPlanner()) {}
+  constructor(private readonly store: PlanStore, private readonly planner: PlannerProvider = new DisabledPlanner()) {}
 
-  catalogue() { return this.store.listCatalogue(); }
-  list(sessionId: string) { return this.store.listPlansForSession(sessionId).map((plan) => this.decorate(plan)); }
+  async catalogue() { return this.store.listCatalogue(); }
+  async list(sessionId: string) { return Promise.all((await this.store.listPlansForSession(sessionId)).map((plan) => this.decorate(plan))); }
 
-  get(sessionId: string, id: string): PlanDetail {
-    const plan = this.store.getPlanForSession(id, sessionId);
+  async get(sessionId: string, id: string): Promise<PlanDetail> {
+    const plan = await this.store.getPlanForSession(id, sessionId);
     if (!plan) throw new AppError('Plan not found for this local session.', 404, 'PLAN_NOT_FOUND');
     return this.decorate(plan);
   }
 
-  create(sessionId: string, input: CreatePlanInput): PlanDetail {
-    this.store.ensureSession(sessionId);
+  async create(sessionId: string, input: CreatePlanInput): Promise<PlanDetail> {
+    await this.store.ensureSession(sessionId);
     this.assertInput(input);
-    const prepared = this.prepareInput(input);
-    return this.decorate(this.store.createPlan(sessionId, prepared.input, prepared.issues));
+    const prepared = await this.prepareInput(input);
+    return this.decorate(await this.store.createPlan(sessionId, prepared.input, prepared.issues));
   }
 
-  update(sessionId: string, id: string, update: UpdatePlanInput): PlanDetail {
-    const current = this.get(sessionId, id);
+  async update(sessionId: string, id: string, update: UpdatePlanInput): Promise<PlanDetail> {
+    const current = await this.get(sessionId, id);
     const merged: CreatePlanInput = { ...asCreateInput(current), ...update, userRequest: current.userRequest, currency: 'USD' };
     this.assertInput(merged);
-    const prepared = this.prepareInput(merged, update.dependencies === undefined && update.selectedOfferingIds !== undefined);
-    return this.decorate(this.store.updatePlan(id, sessionId, prepared.input, prepared.issues));
+    const prepared = await this.prepareInput(merged, update.dependencies === undefined && update.selectedOfferingIds !== undefined);
+    return this.decorate(await this.store.updatePlan(id, sessionId, prepared.input, prepared.issues));
   }
 
-  approve(sessionId: string, id: string): PlanDetail {
-    const refreshed = this.revalidate(sessionId, id, 'Plan was revalidated before approval.');
+  async approve(sessionId: string, id: string): Promise<PlanDetail> {
+    const refreshed = await this.revalidate(sessionId, id, 'Plan was revalidated before approval.');
     if (refreshed.validationIssues.length) throw new AppError('Plan cannot be approved until validation passes.', 422, 'PLAN_INVALID', { issues: refreshed.validationIssues });
-    return this.decorate(this.store.approvePlan(id, sessionId));
+    try { return this.decorate(await this.store.approvePlan(id, sessionId, refreshed.version)); }
+    catch (error) {
+      if (error instanceof Error && error.message === 'PLAN_REVISION_CHANGED') throw new AppError('The plan changed while it was being approved. Review the latest revision before approving.', 409, 'PLAN_REVISION_CHANGED');
+      throw error;
+    }
   }
 
-  reserve(sessionId: string, id: string): PlanDetail {
+  async reserve(sessionId: string, id: string): Promise<PlanDetail> {
     const expiresAt = new Date(Date.now() + RESERVATION_DURATION_MS).toISOString();
     try {
-      return this.decorate(this.store.reserveAtomically(id, sessionId, expiresAt, (plan, quantities) => this.validateDetail(plan, quantities)));
+      return this.decorate(await this.store.reserveAtomically(id, sessionId, expiresAt, (plan, quantities) => this.validateDetail(plan, quantities)));
     } catch (error) {
       if (error instanceof ReservationValidationError) throw new AppError('Plan reservation was not created because validation failed.', 422, 'PLAN_INVALID', error.issues);
       if (error instanceof Error && error.message === 'PLAN_NOT_APPROVED') throw new AppError('Review and approve the valid plan before reserving inventory.', 409, 'PLAN_NOT_APPROVED');
@@ -64,60 +68,60 @@ export class PlanService {
 
   async proposeWithAi(sessionId: string, id: string) {
     if (!this.planner.configured) throw new AppError('AI planning is not configured. Use the clearly labelled sample plan or create a plan manually.', 503, 'AI_NOT_CONFIGURED');
-    const plan = this.get(sessionId, id);
-    const proposal = await this.planner.propose(plan.userRequest, this.catalogue());
-    this.store.saveProposal(id, sessionId, proposal);
+    const plan = await this.get(sessionId, id);
+    const proposal = await this.planner.propose(plan.userRequest, await this.catalogue());
+    await this.store.saveProposal(id, sessionId, proposal);
     return proposal;
   }
 
-  applyDemoControl(sessionId: string, id: string, action: 'REMOVE_ELECTRICITY' | 'MARK_UNAVAILABLE' | 'MAKE_DELIVERY_LATE' | 'EXPIRE_RESERVATIONS'): PlanDetail {
-    const plan = this.get(sessionId, id);
-    if (action === 'EXPIRE_RESERVATIONS') return this.decorate(this.store.forceExpireReservations(id, sessionId));
+  async applyDemoControl(sessionId: string, id: string, action: 'REMOVE_ELECTRICITY' | 'MARK_UNAVAILABLE' | 'MAKE_DELIVERY_LATE' | 'EXPIRE_RESERVATIONS'): Promise<PlanDetail> {
+    const plan = await this.get(sessionId, id);
+    if (action === 'EXPIRE_RESERVATIONS') return this.decorate(await this.store.forceExpireReservations(id, sessionId));
     const target = action === 'MAKE_DELIVERY_LATE'
       ? plan.items.find((item) => item.offering.serviceCategory === 'DELIVERY')
       : plan.items.find((item) => item.offering.serviceCategory === 'STALL');
     if (!target) throw new AppError('This plan does not have an offering that the selected demo control can change.', 422, 'DEMO_CONTROL_UNAVAILABLE');
     const scenario = action === 'REMOVE_ELECTRICITY' ? 'ELECTRICITY_REMOVED' : action === 'MARK_UNAVAILABLE' ? 'SUPPLIER_UNAVAILABLE' : 'DELIVERY_DELAYED';
-    const simulated = simulatePlan(plan, this.catalogue(), scenario);
+    const simulated = simulatePlan(plan, await this.catalogue(), scenario);
     const message = action === 'REMOVE_ELECTRICITY' ? `${target.offering.name} no longer provides electricity in this demo session.`
       : action === 'MARK_UNAVAILABLE' ? `${target.offering.name} was marked unavailable in this demo session.`
         : `${target.offering.name} arrival time changed to 09:30 in this demo session.`;
     // Demo faults are plan/session-scoped. They must not mutate the shared supplier catalogue
     // or revalidate another visitor's plan.
-    return this.decorate(this.store.applyIsolatedSupplierFailure(id, sessionId, simulated.issues, message, simulated.issues.flatMap((issue) => issue.itemIds)));
+    return this.decorate(await this.store.applyIsolatedSupplierFailure(id, sessionId, simulated.issues, message, simulated.issues.flatMap((issue) => issue.itemIds)));
   }
 
-  recordRecoveryEvent(sessionId: string, id: string, message: string, itemIds: string[]): void {
-    this.get(sessionId, id); this.store.addRecoveryEvent(id, message, itemIds);
+  async recordRecoveryEvent(sessionId: string, id: string, message: string, itemIds: string[]): Promise<void> {
+    await this.get(sessionId, id); await this.store.addRecoveryEvent(id, message, itemIds);
   }
 
-  recordRecoveryEventForPlan(id: string, message: string, itemIds: string[]): void {
-    this.store.addRecoveryEvent(id, message, itemIds);
+  async recordRecoveryEventForPlan(id: string, message: string, itemIds: string[]): Promise<void> {
+    await this.store.addRecoveryEvent(id, message, itemIds);
   }
 
-  pendingSupplierFailures(limit?: number): SupplierFailureOutboxRecord[] { return this.store.pendingSupplierFailures(limit); }
-  markSupplierFailureDispatched(id: string): void { this.store.markSupplierFailureDispatched(id); }
-  expireDueReservations(): string[] { return this.store.expireDueReservations(); }
+  async pendingSupplierFailures(limit?: number): Promise<SupplierFailureOutboxRecord[]> { return this.store.pendingSupplierFailures(limit); }
+  async markSupplierFailureDispatched(id: string): Promise<void> { await this.store.markSupplierFailureDispatched(id); }
+  async expireDueReservations(): Promise<string[]> { return this.store.expireDueReservations(); }
 
-  private revalidate(sessionId: string, id: string, reason: string): PlanDetail {
-    const plan = this.get(sessionId, id);
-    const prepared = this.prepareInput(asCreateInput(plan));
+  private async revalidate(sessionId: string, id: string, reason: string): Promise<PlanDetail> {
+    const plan = await this.get(sessionId, id);
+    const prepared = await this.prepareInput(asCreateInput(plan));
     return this.store.updatePlan(id, sessionId, prepared.input, prepared.issues, reason);
   }
 
-  private decorate(plan: PlanDetail): PlanDetail {
-    return { ...plan, alternatives: enumerateAlternatives(plan, this.catalogue()) };
+  private async decorate(plan: PlanDetail): Promise<PlanDetail> {
+    return { ...plan, alternatives: enumerateAlternatives(plan, await this.catalogue()) };
   }
 
-  private prepareInput(input: CreatePlanInput, regenerateDependencies = false): { input: CreatePlanInput; issues: ValidationIssue[] } {
-    const catalogue = this.catalogue();
+  private async prepareInput(input: CreatePlanInput, regenerateDependencies = false): Promise<{ input: CreatePlanInput; issues: ValidationIssue[] }> {
+    const catalogue = await this.catalogue();
     const knownIds = new Set(catalogue.map((offering) => offering.id));
     const unknownIds = input.selectedOfferingIds.filter((id) => !knownIds.has(id));
     if (unknownIds.length) throw new AppError('A selected offering does not exist in the server catalogue.', 422, 'UNKNOWN_OFFERING', unknownIds);
     const items = buildItems(input.selectedOfferingIds, catalogue);
     const dependencies = regenerateDependencies ? defaultDependencies(items) : input.dependencies ?? defaultDependencies(items);
     const prepared = { ...input, dependencies };
-    return { input: prepared, issues: validatePlan({ ...prepared, items, dependencies, reservedQuantities: this.store.activeReservationQuantities(prepared.eventDate) }) };
+    return { input: prepared, issues: validatePlan({ ...prepared, items, dependencies, reservedQuantities: await this.store.activeReservationQuantities(prepared.eventDate) }) };
   }
 
   private validateDetail(plan: PlanDetail, reservedQuantities: Map<string, number>): ValidationIssue[] {

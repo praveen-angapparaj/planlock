@@ -4,6 +4,8 @@ import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ActivityEvent, OperationAttempt, OperationName, OperationOutcome, Transaction, TransactionDetail, TransactionStatus } from './types.js';
 import { DatabaseSync, type SQLiteDatabase } from './sqlite.js';
+import { config } from './config.js';
+import { PostgresPaymentRepository } from './postgres-payments.js';
 
 const DEFAULT_DATABASE_PATH = fileURLToPath(new URL('../../data/planlock.sqlite', import.meta.url));
 const now = () => new Date().toISOString();
@@ -228,4 +230,7 @@ export class PaymentRepository {
   }
 }
 
-export const repository = new PaymentRepository();
+export type PaymentStore = PaymentRepository | PostgresPaymentRepository;
+
+/** SQLite is deliberately selected only when no PostgreSQL URL was configured. */
+export const repository: PaymentStore = config.databaseUrl ? new PostgresPaymentRepository() : new PaymentRepository();

@@ -20,9 +20,9 @@ export function startLocalRecoveryRunner(intervalMs = 5_000): () => void {
     running = true;
     try {
       const service = localRecoveryService();
-      service.drainSupplierFailures();
-      planRepository.expireDueReservations();
-      for (const recoveryCaseId of getRecoveryRepository().dueRecoveryCaseIds()) await service.process(recoveryCaseId);
+      await service.drainSupplierFailures();
+      await planRepository.expireDueReservations();
+      for (const recoveryCaseId of await getRecoveryRepository().dueRecoveryCaseIds()) await service.process(recoveryCaseId);
     } catch (error) {
       console.error(JSON.stringify({ event: 'local_recovery_runner_failed', error: error instanceof Error ? error.message : 'unknown' }));
     } finally { running = false; }
